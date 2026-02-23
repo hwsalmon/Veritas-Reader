@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.env
+
+# Credentials — never commit
+config/google_oauth.json
+~/.config/veritas_reader/token.json
+
+# Generated audio
+*.wav
+*.mp3
+
+# IDE
+.idea/
+.vscode/
+*.swp
