@@ -67,6 +67,38 @@ class AppSettings:
     def last_voice(self, value: str) -> None:
         self._qs.setValue("tts/last_voice", value)
 
+    @property
+    def tts_speed(self) -> float:
+        return float(self._qs.value("tts/speed", 0.9))
+
+    @tts_speed.setter
+    def tts_speed(self, value: float) -> None:
+        self._qs.setValue("tts/speed", float(value))
+
+    @property
+    def pause_sentence_ms(self) -> int:
+        return int(self._qs.value("tts/pause_sentence_ms", 500))
+
+    @pause_sentence_ms.setter
+    def pause_sentence_ms(self, value: int) -> None:
+        self._qs.setValue("tts/pause_sentence_ms", int(value))
+
+    @property
+    def pause_mdash_ms(self) -> int:
+        return int(self._qs.value("tts/pause_mdash_ms", 500))
+
+    @pause_mdash_ms.setter
+    def pause_mdash_ms(self, value: int) -> None:
+        self._qs.setValue("tts/pause_mdash_ms", int(value))
+
+    @property
+    def pause_paragraph_ms(self) -> int:
+        return int(self._qs.value("tts/pause_paragraph_ms", 1000))
+
+    @pause_paragraph_ms.setter
+    def pause_paragraph_ms(self, value: int) -> None:
+        self._qs.setValue("tts/pause_paragraph_ms", int(value))
+
     # ------------------------------------------------------------------
     # Audio post-processing
     # ------------------------------------------------------------------

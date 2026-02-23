@@ -5,12 +5,15 @@ import logging
 from PyQt6.QtCore import QRunnable, QThreadPool, QObject, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import (
     QComboBox,
+    QDoubleSpinBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QSpinBox,
     QWidget,
 )
 
@@ -193,3 +196,88 @@ class FileNameInput(QWidget):
 
     def set_name(self, name: str) -> None:
         self._input.setText(name)
+
+
+# ---------------------------------------------------------------------------
+# Pacing Controls
+# ---------------------------------------------------------------------------
+
+class PacingControls(QWidget):
+    """Spinboxes for TTS speed and inter-segment pause durations."""
+
+    def __init__(self, settings, parent=None) -> None:
+        super().__init__(parent)
+        self._settings = settings
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        # Thin separator before the controls
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(sep)
+
+        layout.addWidget(QLabel("Speed:"))
+        self._speed = QDoubleSpinBox()
+        self._speed.setRange(0.5, 1.5)
+        self._speed.setSingleStep(0.05)
+        self._speed.setDecimals(2)
+        self._speed.setSuffix(" ×")
+        self._speed.setFixedWidth(72)
+        self._speed.setToolTip("Voice speed multiplier (1.0 = normal)")
+        self._speed.setValue(self._settings.tts_speed)
+        self._speed.valueChanged.connect(lambda v: setattr(self._settings, "tts_speed", v))
+        layout.addWidget(self._speed)
+
+        layout.addWidget(QLabel("Sentence:"))
+        self._sentence = QSpinBox()
+        self._sentence.setRange(0, 2000)
+        self._sentence.setSingleStep(50)
+        self._sentence.setSuffix(" ms")
+        self._sentence.setFixedWidth(80)
+        self._sentence.setToolTip("Silence added after each sentence ending")
+        self._sentence.setValue(self._settings.pause_sentence_ms)
+        self._sentence.valueChanged.connect(lambda v: setattr(self._settings, "pause_sentence_ms", v))
+        layout.addWidget(self._sentence)
+
+        layout.addWidget(QLabel("M-dash:"))
+        self._mdash = QSpinBox()
+        self._mdash.setRange(0, 2000)
+        self._mdash.setSingleStep(50)
+        self._mdash.setSuffix(" ms")
+        self._mdash.setFixedWidth(80)
+        self._mdash.setToolTip("Silence added at em-dash / double-hyphen breaks")
+        self._mdash.setValue(self._settings.pause_mdash_ms)
+        self._mdash.valueChanged.connect(lambda v: setattr(self._settings, "pause_mdash_ms", v))
+        layout.addWidget(self._mdash)
+
+        layout.addWidget(QLabel("Paragraph:"))
+        self._paragraph = QSpinBox()
+        self._paragraph.setRange(0, 5000)
+        self._paragraph.setSingleStep(100)
+        self._paragraph.setSuffix(" ms")
+        self._paragraph.setFixedWidth(88)
+        self._paragraph.setToolTip("Silence added between paragraphs")
+        self._paragraph.setValue(self._settings.pause_paragraph_ms)
+        self._paragraph.valueChanged.connect(lambda v: setattr(self._settings, "pause_paragraph_ms", v))
+        layout.addWidget(self._paragraph)
+
+    # ------------------------------------------------------------------
+    # Accessors (read by window.py at synthesis time)
+    # ------------------------------------------------------------------
+
+    def speed(self) -> float:
+        return self._speed.value()
+
+    def sentence_ms(self) -> int:
+        return self._sentence.value()
+
+    def mdash_ms(self) -> int:
+        return self._mdash.value()
+
+    def paragraph_ms(self) -> int:
+        return self._paragraph.value()

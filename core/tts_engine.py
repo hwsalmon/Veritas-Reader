@@ -9,6 +9,7 @@ through core.audio_processor.remove_silence() before playback/export.
 
 import logging
 import os
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +17,112 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 TTS_ENGINE_ENV = os.environ.get("TTS_ENGINE", "kokoro")
+
+# ---------------------------------------------------------------------------
+# Narration pacing defaults — silence (ms) inserted AFTER each segment type.
+# These are the fall-through defaults; callers pass their own values.
+# ---------------------------------------------------------------------------
+DEFAULT_SPEED         = 0.9
+DEFAULT_SENTENCE_MS   = 500
+DEFAULT_MDASH_MS      = 500
+DEFAULT_PARAGRAPH_MS  = 1000
+
+
+def _modulate_speeds(
+    tokens: list[tuple[str, str]],
+    base_speed: float,
+) -> list[float]:
+    """Return a per-segment speed that mimics natural speech cadence.
+
+    Rules (all multiplicative, capped to [0.5, 1.4]):
+
+    Phrase-final lengthening
+      • Last segment before paragraph  →  ×0.88  (strong closure)
+      • Last segment before sentence   →  ×0.93  (gentle slowdown)
+      • Last segment before mdash      →  ×0.94  (slight suspense)
+
+    Paragraph opening
+      • First segment of each paragraph → ×0.96  (thoughtful start)
+
+    Post-mdash re-entry
+      • First segment after a mdash    → ×0.96  (deliberate return)
+
+    Mid-paragraph cadence oscillation
+      • ±3% sine wave across segment index within each paragraph.
+        Creates a natural ebb-and-flow rather than robotic uniformity.
+    """
+    import math
+
+    speeds: list[float] = []
+    para_idx = 0       # position within current paragraph
+    post_mdash = False
+
+    for chunk, pause_type in tokens:
+        s = base_speed
+
+        # Phrase-final lengthening
+        if pause_type == "paragraph":
+            s *= 0.88
+        elif pause_type == "sentence":
+            s *= 0.93
+        elif pause_type == "mdash":
+            s *= 0.94
+
+        # Paragraph-initial — first sentence feels unhurried
+        if para_idx == 0:
+            s *= 0.96
+
+        # Post-mdash re-entry
+        if post_mdash:
+            s *= 0.96
+
+        # Gentle cadence oscillation (±3%)
+        s *= 1.0 + 0.03 * math.sin(para_idx * 1.2)
+
+        speeds.append(round(max(0.5, min(1.4, s)), 3))
+
+        # Advance state
+        post_mdash = (pause_type == "mdash")
+        para_idx = 0 if pause_type == "paragraph" else para_idx + 1
+
+    return speeds
+
+
+def _tokenize_for_pacing(text: str) -> list[tuple[str, str]]:
+    """Split *text* into (segment, pause_type) pairs.
+
+    pause_type is one of: 'paragraph', 'sentence', 'mdash', 'none'
+    The pause is inserted *after* the segment during assembly.
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    # Split on paragraph breaks, em-dashes, or sentence-ending whitespace.
+    # Sentence split requires a capital letter / quote after the space so that
+    # abbreviations like "Mr. Smith" or "e.g. something" are NOT split.
+    # The capturing group keeps separators in the result list so we can
+    # inspect them (re.split alternates: [chunk, sep, chunk, sep, …, chunk]).
+    pattern = r"""(\n\n+|\s*(?:--|—)\s*|(?<=[.!?])\s+(?=[A-Z"'\u201c\u2018]))"""
+    parts = re.split(pattern, text)
+
+    result: list[tuple[str, str]] = []
+    for i in range(0, len(parts), 2):
+        chunk = parts[i].strip()
+        if not chunk:
+            continue
+
+        pause = "none"
+        if i + 1 < len(parts):
+            sep = parts[i + 1]
+            if "\n\n" in sep or sep.count("\n") >= 2:
+                pause = "paragraph"
+            elif "--" in sep or "—" in sep:
+                pause = "mdash"
+            else:
+                pause = "sentence"
+
+        result.append((chunk, pause))
+
+    return result
 
 
 @dataclass
@@ -59,37 +166,62 @@ class TTSEngine(ABC):
 
 
 # ------------------------------------------------------------------
-# Kokoro Engine
+# Kokoro Engine (via kokoro-onnx)
 # ------------------------------------------------------------------
 
 class KokoroEngine(TTSEngine):
-    """High-quality TTS via the Kokoro-82M model."""
+    """High-quality TTS via the Kokoro-82M ONNX model."""
 
     VOICES = [
-        VoiceProfile("af_heart", "Heart (EN-F)", "kokoro", "en"),
-        VoiceProfile("af_bella", "Bella (EN-F)", "kokoro", "en"),
-        VoiceProfile("af_sarah", "Sarah (EN-F)", "kokoro", "en"),
-        VoiceProfile("am_adam", "Adam (EN-M)", "kokoro", "en"),
-        VoiceProfile("am_michael", "Michael (EN-M)", "kokoro", "en"),
+        VoiceProfile("af_heart", "Heart (EN-F)", "kokoro", "en-us"),
+        VoiceProfile("af_bella", "Bella (EN-F)", "kokoro", "en-us"),
+        VoiceProfile("af_sarah", "Sarah (EN-F)", "kokoro", "en-us"),
+        VoiceProfile("am_adam", "Adam (EN-M)", "kokoro", "en-us"),
+        VoiceProfile("am_michael", "Michael (EN-M)", "kokoro", "en-us"),
         VoiceProfile("bf_emma", "Emma (EN-GB-F)", "kokoro", "en-gb"),
         VoiceProfile("bm_george", "George (EN-GB-M)", "kokoro", "en-gb"),
     ]
 
     def __init__(self) -> None:
-        self._pipeline = None
+        self._kokoro = None
 
-    def _get_pipeline(self, lang_code: str = "a"):
-        """Lazy-load the Kokoro pipeline."""
-        if self._pipeline is None:
+    @staticmethod
+    def _model_dir() -> Path:
+        from platformdirs import user_data_dir
+        return Path(user_data_dir("veritas_reader")) / "models"
+
+    def _get_kokoro(self):
+        """Lazy-load the Kokoro ONNX instance."""
+        if self._kokoro is None:
             try:
-                from kokoro import KPipeline
-                self._pipeline = KPipeline(lang_code=lang_code)
-                logger.info("Kokoro pipeline loaded (lang=%s)", lang_code)
+                from kokoro_onnx import Kokoro
             except ImportError as exc:
                 raise RuntimeError(
-                    "Kokoro package not installed. Run: pip install kokoro"
+                    "kokoro-onnx not installed. Run: pip install kokoro-onnx"
                 ) from exc
-        return self._pipeline
+
+            model_dir = self._model_dir()
+            voices_path = model_dir / "voices-v1.0.bin"
+
+            # Prefer higher-quality models when available
+            for candidate in ("kokoro-v1.0.fp16.onnx", "kokoro-v1.0.int8.onnx"):
+                model_path = model_dir / candidate
+                if model_path.exists():
+                    logger.info("Using Kokoro model: %s", candidate)
+                    break
+            else:
+                raise RuntimeError(
+                    f"No Kokoro model file found in {model_dir}. "
+                    "Download kokoro-v1.0.fp16.onnx (or int8) and voices-v1.0.bin from "
+                    "https://github.com/thewh1teagle/kokoro-onnx/releases"
+                )
+
+            if not voices_path.exists():
+                raise RuntimeError(f"voices-v1.0.bin missing in {model_dir}.")
+
+            self._kokoro = Kokoro(str(model_path), str(voices_path))
+            logger.info("Kokoro ONNX loaded from %s", model_dir)
+        return self._kokoro
 
     def list_voices(self) -> list[VoiceProfile]:
         return list(self.VOICES)
@@ -99,45 +231,80 @@ class KokoroEngine(TTSEngine):
         text: str,
         output_path: Path,
         voice: VoiceProfile | None = None,
-        speed: float = 1.0,
+        speed: float = DEFAULT_SPEED,
+        pause_sentence_ms: int = DEFAULT_SENTENCE_MS,
+        pause_mdash_ms: int = DEFAULT_MDASH_MS,
+        pause_paragraph_ms: int = DEFAULT_PARAGRAPH_MS,
     ) -> Path:
         import numpy as np
         import soundfile as sf
 
         voice = voice or self.VOICES[0]
-        lang_code = "a" if voice.lang_code.startswith("en") else voice.lang_code
-        pipeline = self._get_pipeline(lang_code)
+        kokoro = self._get_kokoro()
 
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
+        from core.text_preprocessor import preprocess
+        text = preprocess(text)
+
+        tokens = _tokenize_for_pacing(text)
+        local_speeds = _modulate_speeds(tokens, speed)
         logger.info(
-            "Kokoro synthesizing %d chars with voice=%s speed=%.1f",
-            len(text), voice.id, speed,
+            "Kokoro synthesizing %d segment(s) | voice=%s base_speed=%.2f "
+            "pauses: sentence=%dms mdash=%dms para=%dms",
+            len(tokens), voice.id, speed,
+            pause_sentence_ms, pause_mdash_ms, pause_paragraph_ms,
         )
 
-        audio_chunks = []
-        sample_rate = 24000
+        pause_map = {
+            "sentence":  pause_sentence_ms,
+            "mdash":     pause_mdash_ms,
+            "paragraph": pause_paragraph_ms,
+            "none":      0,
+        }
 
-        try:
-            generator = pipeline(
-                text,
-                voice=voice.id,
-                speed=speed,
-                split_pattern=r"\n+",
-            )
-            for _gs, _ps, audio in generator:
-                if audio is not None:
-                    audio_chunks.append(audio)
-        except Exception as exc:
-            raise RuntimeError(f"Kokoro synthesis failed: {exc}") from exc
+        segments: list[np.ndarray] = []
+        sample_rate: int | None = None
 
-        if not audio_chunks:
-            raise RuntimeError("Kokoro produced no audio output.")
+        for (chunk, pause_type), local_speed in zip(tokens, local_speeds):
+            # Skip segments too short to synthesise (punctuation-only fragments, etc.)
+            if len(chunk.strip()) < 3:
+                continue
 
-        combined = np.concatenate(audio_chunks)
+            try:
+                samples, sr = kokoro.create(
+                    text=chunk,
+                    voice=voice.id,
+                    speed=local_speed,
+                    lang=voice.lang_code,
+                )
+            except Exception as exc:
+                raise RuntimeError(f"Kokoro synthesis failed on segment: {exc}") from exc
+
+            if samples is None or len(samples) == 0:
+                logger.warning("Kokoro returned empty audio for segment: %r — skipping.", chunk[:60])
+                continue
+
+            if sample_rate is None:
+                sample_rate = sr
+
+            segments.append(samples)
+
+            pause_ms = pause_map.get(pause_type, 0)
+            if pause_ms > 0:
+                silence = np.zeros(int(sr * pause_ms / 1000), dtype=samples.dtype)
+                segments.append(silence)
+
+        if not segments:
+            raise RuntimeError("No audio produced — text may have been empty after tokenisation.")
+
+        combined = np.concatenate(segments)
         sf.write(str(output_path), combined, sample_rate)
-        logger.info("Kokoro raw output: %s (%.1f s)", output_path, len(combined) / sample_rate)
+        logger.info(
+            "Kokoro raw output: %s (%.1f s, %d segment(s))",
+            output_path, len(combined) / sample_rate, len(tokens),
+        )
         return output_path
 
 

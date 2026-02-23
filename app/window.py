@@ -21,9 +21,9 @@ from PyQt6.QtWidgets import (
 
 from app.editor import EditorWidget
 from app.player import PlayerWidget
-from app.toolbar import FileNameInput, ModelSelectorCombo, VoiceSelectorCombo, Worker
+from app.toolbar import FileNameInput, ModelSelectorCombo, PacingControls, VoiceSelectorCombo, Worker
 from config.settings import AppSettings
-from core.audio_processor import remove_silence
+from core.audio_processor import process_audio_pipeline
 from core.file_handler import (
     FileHandlerError,
     read_file,
@@ -74,19 +74,41 @@ class TTSWorker(QRunnable):
         error = pyqtSignal(str)
         finished = pyqtSignal()
 
-    def __init__(self, engine, text: str, output_path: Path, voice) -> None:
+    def __init__(
+        self,
+        engine,
+        text: str,
+        output_path: Path,
+        voice,
+        speed: float = 0.9,
+        pause_sentence_ms: int = 500,
+        pause_mdash_ms: int = 500,
+        pause_paragraph_ms: int = 1000,
+    ) -> None:
         super().__init__()
         self._engine = engine
         self._text = text
         self._output_path = output_path
         self._voice = voice
+        self._speed = speed
+        self._pause_sentence_ms = pause_sentence_ms
+        self._pause_mdash_ms = pause_mdash_ms
+        self._pause_paragraph_ms = pause_paragraph_ms
         self.signals = self.Signals()
         self.setAutoDelete(True)
 
     @pyqtSlot()
     def run(self) -> None:
         try:
-            result = self._engine.synthesize(self._text, self._output_path, self._voice)
+            result = self._engine.synthesize(
+                self._text,
+                self._output_path,
+                self._voice,
+                speed=self._speed,
+                pause_sentence_ms=self._pause_sentence_ms,
+                pause_mdash_ms=self._pause_mdash_ms,
+                pause_paragraph_ms=self._pause_paragraph_ms,
+            )
             self.signals.result.emit(str(result))
         except Exception as exc:
             logger.exception("TTS error: %s", exc)
@@ -122,6 +144,7 @@ class MainWindow(QMainWindow):
 
         root.addWidget(self._build_file_bar())
         root.addWidget(self._build_model_bar())
+        root.addWidget(self._build_pacing_bar())
         root.addWidget(self._build_content_area(), stretch=1)
         root.addWidget(self._build_player_bar())
         root.addWidget(self._build_export_bar())
@@ -179,6 +202,15 @@ class MainWindow(QMainWindow):
         self._tts_btn.clicked.connect(self._on_synthesize)
         layout.addWidget(self._tts_btn)
 
+        return bar
+
+    def _build_pacing_bar(self) -> QWidget:
+        bar = QWidget()
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._pacing = PacingControls(self._settings)
+        layout.addWidget(self._pacing)
+        layout.addStretch()
         return bar
 
     def _build_content_area(self) -> QSplitter:
@@ -364,7 +396,16 @@ class MainWindow(QMainWindow):
         self._tts_btn.setEnabled(False)
         self.statusBar().showMessage("Synthesizing audio…")
 
-        worker = TTSWorker(self._tts_engine, text, raw_path, voice)
+        worker = TTSWorker(
+            self._tts_engine,
+            text,
+            raw_path,
+            voice,
+            speed=self._pacing.speed(),
+            pause_sentence_ms=self._pacing.sentence_ms(),
+            pause_mdash_ms=self._pacing.mdash_ms(),
+            pause_paragraph_ms=self._pacing.paragraph_ms(),
+        )
         worker.signals.result.connect(self._on_tts_complete)
         worker.signals.error.connect(self._on_tts_error)
         self._pool.start(worker)
@@ -373,9 +414,9 @@ class MainWindow(QMainWindow):
         raw_path = Path(raw_path_str)
         processed_path = raw_path.with_name(raw_path.stem.replace("_raw", "_processed") + ".wav")
 
-        self.statusBar().showMessage("Removing silences…")
+        self.statusBar().showMessage("Processing audio…")
         worker = Worker(
-            remove_silence,
+            process_audio_pipeline,
             raw_path,
             processed_path,
             self._settings.silence_thresh_db,
