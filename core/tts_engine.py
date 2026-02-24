@@ -219,8 +219,21 @@ class KokoroEngine(TTSEngine):
             if not voices_path.exists():
                 raise RuntimeError(f"voices-v1.0.bin missing in {model_dir}.")
 
-            self._kokoro = Kokoro(str(model_path), str(voices_path))
-            logger.info("Kokoro ONNX loaded from %s", model_dir)
+            import onnxruntime as rt
+            opts = rt.SessionOptions()
+            opts.intra_op_num_threads = 8
+            opts.inter_op_num_threads = 4
+            opts.execution_mode = rt.ExecutionMode.ORT_SEQUENTIAL
+            session = rt.InferenceSession(
+                str(model_path),
+                sess_options=opts,
+                providers=["CPUExecutionProvider"],
+            )
+            self._kokoro = Kokoro.from_session(session, str(voices_path))
+            logger.info(
+                "Kokoro ONNX loaded from %s (8 intra-op / 4 inter-op threads)",
+                model_dir,
+            )
         return self._kokoro
 
     def list_voices(self) -> list[VoiceProfile]:
