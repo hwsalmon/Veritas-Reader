@@ -124,6 +124,16 @@ class AppSettings:
     # ------------------------------------------------------------------
 
     @property
+    def vault_root(self) -> Path:
+        default = Path.home() / "Documents" / "VeritasVault"
+        raw = self._qs.value("paths/vault_root", str(default))
+        return Path(raw)
+
+    @vault_root.setter
+    def vault_root(self, value: Path) -> None:
+        self._qs.setValue("paths/vault_root", str(value))
+
+    @property
     def output_dir(self) -> Path:
         default = Path(user_data_dir(APP_NAME)) / "exports"
         raw = self._qs.value("paths/output_dir", str(default))

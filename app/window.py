@@ -14,6 +14,8 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -27,7 +29,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from app.editor import EditorWidget
+from app.editor_tabs import EditorTabWidget
 from app.player import PlayerWidget
 from app.toolbar import FileNameInput, ModelSelectorCombo, PacingControls, VoiceSelectorCombo, Worker
 from config.settings import AppSettings
@@ -46,6 +48,7 @@ from core.knowledge_base import (
 )
 from core.ollama_client import OllamaClient, OllamaError
 from core.tts_engine import get_engine
+from core.vault import Vault
 
 logger = logging.getLogger(__name__)
 
@@ -283,6 +286,9 @@ class MainWindow(QMainWindow):
         self._dirty: bool = False
         self._generate_chat_messages: list[dict] = []
         self._stream_buffer: str = ""
+        self._vault: Vault | None = None
+        self._kb_chat_messages: list[dict] = []
+        self._kb_response_buffer: str = ""
 
         self.setWindowTitle("Veritas Editor")
         self.resize(1200, 780)
@@ -348,6 +354,11 @@ class MainWindow(QMainWindow):
         self._ai_toggle_btn.clicked.connect(self._on_toggle_ai)
         layout.addWidget(self._ai_toggle_btn)
 
+        vault_btn = QPushButton("Vault…")
+        vault_btn.setToolTip("Choose vault root folder for document projects")
+        vault_btn.clicked.connect(self._on_choose_vault)
+        layout.addWidget(vault_btn)
+
         layout.addStretch()
 
         self._theme_btn = QPushButton("Dark" if not self._settings.dark_mode else "Light")
@@ -389,7 +400,7 @@ class MainWindow(QMainWindow):
     def _build_content_area(self) -> QSplitter:
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        self._editor = EditorWidget()
+        self._editor = EditorTabWidget()
         self._splitter.addWidget(self._editor)
 
         # AI panel with tabs
@@ -400,6 +411,7 @@ class MainWindow(QMainWindow):
         self._ai_tabs = QTabWidget()
         self._ai_tabs.addTab(self._build_generate_tab(), "Generate")
         self._ai_tabs.addTab(self._build_kb_tab(), "KB Chat")
+        self._ai_tabs.addTab(self._build_history_tab(), "History")
         al.addWidget(self._ai_tabs)
 
         self._ai_panel.hide()
@@ -447,10 +459,19 @@ class MainWindow(QMainWindow):
         self._ai_output.setPlaceholderText("AI-generated text will appear here…")
         layout.addWidget(self._ai_output)
 
+        action_row = QWidget()
+        arl = QHBoxLayout(action_row)
+        arl.setContentsMargins(0, 0, 0, 0)
         copy_btn = QPushButton("Copy to Editor")
         copy_btn.setToolTip("Copy AI output into the main editor")
         copy_btn.clicked.connect(self._on_copy_ai_to_editor)
-        layout.addWidget(copy_btn)
+        arl.addWidget(copy_btn)
+        tab_btn = QPushButton("Open in New Tab")
+        tab_btn.setToolTip("Open AI output in a new editor tab for tweaking")
+        tab_btn.clicked.connect(self._on_ai_output_to_tab)
+        arl.addWidget(tab_btn)
+        arl.addStretch()
+        layout.addWidget(action_row)
 
         # --- Follow-up chat row ---
         sep = QFrame()
@@ -548,6 +569,35 @@ class MainWindow(QMainWindow):
 
         return tab
 
+    def _build_history_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        layout.addWidget(QLabel("AI Session History"))
+
+        self._history_list = QListWidget()
+        self._history_list.setToolTip("Double-click a session to reload it in the Generate tab")
+        self._history_list.itemDoubleClicked.connect(self._on_load_history_item)
+        layout.addWidget(self._history_list)
+
+        btn_row = QWidget()
+        brl = QHBoxLayout(btn_row)
+        brl.setContentsMargins(0, 0, 0, 0)
+        load_btn = QPushButton("Load Session")
+        load_btn.setToolTip("Reload the selected session into the Generate tab")
+        load_btn.clicked.connect(self._on_load_history_item)
+        brl.addWidget(load_btn)
+        del_btn = QPushButton("Delete")
+        del_btn.setToolTip("Permanently delete the selected session file")
+        del_btn.clicked.connect(self._on_delete_history_item)
+        brl.addWidget(del_btn)
+        brl.addStretch()
+        layout.addWidget(btn_row)
+
+        return tab
+
     def _build_player_bar(self) -> QWidget:
         container = QWidget()
         layout = QHBoxLayout(container)
@@ -560,6 +610,11 @@ class MainWindow(QMainWindow):
         bar = QWidget()
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(0, 0, 0, 0)
+
+        commit_btn = QPushButton("Commit Version")
+        commit_btn.setToolTip("Save current content as a new version in the vault")
+        commit_btn.clicked.connect(self._on_commit_version)
+        layout.addWidget(commit_btn)
 
         export_md = QPushButton("Export .md")
         export_md.clicked.connect(lambda: self._on_export("md"))
@@ -624,10 +679,12 @@ class MainWindow(QMainWindow):
             p = Path(path)
             text = read_file(p)
             self._editor.set_text(text)
+            self._editor.set_main_tab_title(p.stem)
             self._file_name_input.set_name(p.stem)
             self._settings.last_file_path = path
             self._settings.last_open_dir = str(p.parent)
             self._current_file_path = p
+            self._init_vault(p)
             self._autosave_path = self._compute_autosave_path(p)
             self._dirty = False
             self.statusBar().showMessage(f"Opened: {path}")
@@ -647,6 +704,9 @@ class MainWindow(QMainWindow):
         if not p.exists():
             return
         try:
+            # Init vault first so _compute_autosave_path uses vault/versions/
+            self._init_vault(p)
+
             # Restore from the last autosave if it exists (more recent than original)
             load_path = p
             autosave_str = self._settings.last_autosave_path
@@ -657,6 +717,7 @@ class MainWindow(QMainWindow):
 
             text = read_file(load_path)
             self._editor.set_text(text)
+            self._editor.set_main_tab_title(p.stem)
             self._file_name_input.set_name(p.stem)
             self._current_file_path = p          # always the original
             self._autosave_path = self._compute_autosave_path(p)
@@ -670,8 +731,57 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             logger.warning("Could not reopen last file %s: %s", p, exc)
 
+    def _init_vault(self, path: Path) -> None:
+        """Create (or re-open) the vault for the document at *path*."""
+        self._vault = Vault(self._settings.vault_root, path.stem)
+        self._vault.init()
+        self._refresh_history_tab()
+        logger.info("Vault: %s", self._vault.root)
+
+    def _on_choose_vault(self) -> None:
+        """Let user pick a new vault root folder."""
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Choose Vault Root Folder",
+            str(self._settings.vault_root),
+        )
+        if not folder:
+            return
+        self._settings.vault_root = Path(folder)
+        # Re-init vault for current document if one is open
+        if self._current_file_path:
+            self._init_vault(self._current_file_path)
+        self.statusBar().showMessage(f"Vault root: {folder}")
+
+    def _refresh_history_tab(self) -> None:
+        """Repopulate the History list from the vault's ai_history/ folder."""
+        if not hasattr(self, "_history_list"):
+            return
+        self._history_list.clear()
+        if self._vault is None:
+            return
+        for path in self._vault.list_ai_sessions():
+            try:
+                data = self._vault.load_ai_session(path)
+                ts = data.get("timestamp", path.stem)
+                stype = data.get("type", "?")
+                model = data.get("model", "?")
+                label = f"{ts}  [{stype}]  {model}"
+            except Exception:
+                label = path.stem
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, str(path))
+            self._history_list.addItem(item)
+
     def _compute_autosave_path(self, original: Path) -> Path:
-        """Return the next unused versioned path: stem-N.ext in same directory."""
+        """Return the next unused versioned path.
+
+        Uses vault/versions/ when a vault is active, otherwise falls back to
+        the same directory as the original file.
+        """
+        if self._vault:
+            return self._vault.next_version_path(original.suffix or ".md")
+        # Legacy fallback: same directory as original
         stem = original.stem
         suffix = original.suffix or ".md"
         parent = original.parent
@@ -796,6 +906,15 @@ class MainWindow(QMainWindow):
         has_chat = len(self._generate_chat_messages) >= 2
         self._followup_input.setEnabled(has_chat)
         self._followup_btn.setEnabled(has_chat)
+        # Persist to vault
+        if self._vault and has_chat:
+            self._vault.save_ai_session(
+                session_type="generate",
+                model=self._model_selector.current_model() or "unknown",
+                messages=self._generate_chat_messages,
+                document_name=self._file_name_input.get_name(),
+            )
+            self._refresh_history_tab()
         msg = "Generation stopped." if self._generation_cancelled else "Generation complete."
         self.statusBar().showMessage(msg)
 
@@ -861,6 +980,72 @@ class MainWindow(QMainWindow):
             self._editor.set_text(text)
             self.statusBar().showMessage("AI output copied to editor.")
 
+    def _on_ai_output_to_tab(self) -> None:
+        text = self._ai_output.toPlainText().strip()
+        if text:
+            self._editor.open_in_new_tab(text, "AI Draft")
+            self.statusBar().showMessage("AI output opened in new editor tab.")
+
+    def _on_load_history_item(self) -> None:
+        """Reload a saved AI session back into the Generate tab."""
+        items = self._history_list.selectedItems()
+        if not items:
+            return
+        path_str = items[0].data(Qt.ItemDataRole.UserRole)
+        if not path_str:
+            return
+        try:
+            data = self._vault.load_ai_session(Path(path_str))
+            messages = data.get("messages", [])
+            if not messages:
+                return
+            self._generate_chat_messages = list(messages)
+            self._ai_output.clear()
+            for msg in messages:
+                role = msg.get("role", "?")
+                content = msg.get("content", "")
+                cursor = self._ai_output.textCursor()
+                cursor.movePosition(cursor.MoveOperation.End)
+                if self._ai_output.toPlainText():
+                    cursor.insertText("\n\n")
+                if role == "user":
+                    cursor.insertText(f"[Prompt]\n{content}\n\n[Response]\n")
+                elif role == "assistant":
+                    cursor.insertText(content)
+                self._ai_output.setTextCursor(cursor)
+            self._ai_output.ensureCursorVisible()
+            has_chat = len(messages) >= 2
+            self._followup_input.setEnabled(has_chat)
+            self._followup_btn.setEnabled(has_chat)
+            self._ai_tabs.setCurrentIndex(0)
+            self.statusBar().showMessage(f"Session loaded: {Path(path_str).stem}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Load Error", str(exc))
+
+    def _on_delete_history_item(self) -> None:
+        """Delete the selected AI session file from the vault."""
+        items = self._history_list.selectedItems()
+        if not items:
+            return
+        path_str = items[0].data(Qt.ItemDataRole.UserRole)
+        if not path_str:
+            return
+        p = Path(path_str)
+        reply = QMessageBox.question(
+            self,
+            "Delete Session",
+            f"Permanently delete session '{p.stem}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            p.unlink()
+            self._refresh_history_tab()
+            self.statusBar().showMessage(f"Deleted: {p.stem}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Delete Error", str(exc))
+
     # ------------------------------------------------------------------
     # Knowledge base — build
     # ------------------------------------------------------------------
@@ -924,11 +1109,12 @@ class MainWindow(QMainWindow):
     def _on_save_kb(self) -> None:
         if self._kb is None:
             return
-        self._settings.kb_dir.mkdir(parents=True, exist_ok=True)
+        default_dir = self._vault.kb_dir if self._vault else self._settings.kb_dir
+        default_dir.mkdir(parents=True, exist_ok=True)
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Knowledge Base",
-            str(self._settings.kb_dir / f"{self._kb.name}.vkb"),
+            str(default_dir / f"{self._kb.name}.vkb"),
             "Veritas Knowledge Base (*.vkb)",
         )
         if not path:
@@ -984,6 +1170,10 @@ class MainWindow(QMainWindow):
         self._kb_stop_btn.setEnabled(True)
         self.statusBar().showMessage("Querying knowledge base…")
 
+        # Track conversation for vault history
+        self._kb_chat_messages.append({"role": "user", "content": question})
+        self._kb_response_buffer = ""
+
         # Append user turn to chat display
         cursor = self._kb_chat.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
@@ -1006,6 +1196,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Stopping KB query…")
 
     def _on_kb_token(self, token: str) -> None:
+        self._kb_response_buffer += token
         cursor = self._kb_chat.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
         cursor.insertText(token)
@@ -1025,6 +1216,20 @@ class MainWindow(QMainWindow):
         cursor.movePosition(cursor.MoveOperation.End)
         cursor.insertText("\n\n" + "─" * 40)
         self._kb_chat.setTextCursor(cursor)
+        # Persist conversation turn to vault
+        if self._kb_response_buffer.strip():
+            self._kb_chat_messages.append(
+                {"role": "assistant", "content": self._kb_response_buffer.strip()}
+            )
+        self._kb_response_buffer = ""
+        if self._vault and len(self._kb_chat_messages) >= 2:
+            self._vault.save_ai_session(
+                session_type="kb_chat",
+                model=self._model_selector.current_model() or "unknown",
+                messages=self._kb_chat_messages,
+                document_name=self._file_name_input.get_name(),
+            )
+            self._refresh_history_tab()
         self.statusBar().showMessage("Ready")
 
     # ------------------------------------------------------------------
@@ -1040,10 +1245,15 @@ class MainWindow(QMainWindow):
         voice = self._voice_selector.current_voice()
         self._settings.last_voice = voice.id if voice else ""
 
-        temp_dir = self._settings.temp_dir
-        temp_dir.mkdir(parents=True, exist_ok=True)
         base_name = self._file_name_input.get_name()
-        raw_path = temp_dir / f"{base_name}_raw.wav"
+        if self._vault:
+            audio_dir = self._vault.audio_dir
+            audio_dir.mkdir(parents=True, exist_ok=True)
+            raw_path = self._vault.audio_path(f"{base_name}_raw.wav")
+        else:
+            temp_dir = self._settings.temp_dir
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            raw_path = temp_dir / f"{base_name}_raw.wav"
 
         self._tts_btn.setEnabled(False)
         self.statusBar().showMessage("Synthesizing audio…")
@@ -1094,6 +1304,29 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Export
     # ------------------------------------------------------------------
+
+    def _on_commit_version(self) -> None:
+        """Save the primary editor tab content as a new versioned file in the vault."""
+        text = self._editor.get_main_text().strip()
+        if not text:
+            QMessageBox.warning(self, "Empty Editor", "Nothing to commit.")
+            return
+        if self._vault is None:
+            QMessageBox.warning(
+                self,
+                "No Vault",
+                "Open a document first so a vault is created, then commit.",
+            )
+            return
+        suffix = self._current_file_path.suffix if self._current_file_path else ".md"
+        version_path = self._vault.next_version_path(suffix)
+        try:
+            version_path.parent.mkdir(parents=True, exist_ok=True)
+            version_path.write_text(text, encoding="utf-8")
+            self.statusBar().showMessage(f"Version committed: {version_path.name}")
+            logger.info("Committed version: %s", version_path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Commit Error", str(exc))
 
     def _on_export(self, fmt: str) -> None:
         text = self._editor.get_text().strip()
