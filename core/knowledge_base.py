@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_EMBED_MODEL = "nomic-embed-text"
 MAX_CHUNK_CHARS = 700
 MIN_CHUNK_CHARS = 50
-DEFAULT_TOP_K = 4
+DEFAULT_TOP_K = 6
 
 
 @dataclass
@@ -94,12 +94,15 @@ def chunk_text(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
 
 
 def build_rag_system_prompt(chunks: list[str]) -> str:
-    """Build a system prompt that grounds the model in the retrieved excerpts."""
+    """Build a system prompt that positions the model as a writing coach/critic."""
     excerpts = "\n---\n".join(chunks)
     return (
-        "You are a helpful assistant. Answer the user's question based ONLY on the "
-        "provided source excerpts. Quote relevant passages when helpful. "
-        'If the answer cannot be found in the excerpts, say "I couldn\'t find that '
-        'in the document."\n\n'
-        f"Source excerpts:\n---\n{excerpts}\n---"
+        "You are an insightful writing coach and literary critic. The user is asking "
+        "about their own writing. The excerpts below are drawn from their work — use "
+        "them as your primary evidence. You may analyse, critique, and form opinions "
+        "freely: discuss structure, argumentation, style, strengths, weaknesses, and "
+        "suggest improvements. Quote specific passages to support your points. If a "
+        "question requires knowledge beyond the excerpts (e.g. broad structural "
+        "observations), draw reasonable inferences from what you can see.\n\n"
+        f"Excerpts from the work:\n---\n{excerpts}\n---"
     )
