@@ -5,18 +5,23 @@ import tempfile
 import threading
 from pathlib import Path
 
+import numpy as np
+
 from PyQt6.QtCore import QRunnable, QThreadPool, QObject, pyqtSignal, pyqtSlot, Qt
 from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSizePolicy,
     QSplitter,
     QStatusBar,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -33,14 +38,24 @@ from core.file_handler import (
     write_docx,
     write_markdown,
 )
+from core.knowledge_base import (
+    KnowledgeBase,
+    build_rag_system_prompt,
+    chunk_text,
+    DEFAULT_EMBED_MODEL,
+)
 from core.ollama_client import OllamaClient, OllamaError
 from core.tts_engine import get_engine
 
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Workers
+# ---------------------------------------------------------------------------
+
 class StreamWorker(QRunnable):
-    """Worker that streams Ollama tokens and emits them one by one."""
+    """Streams Ollama generation tokens."""
 
     class Signals(QObject):
         token = pyqtSignal(str)
@@ -76,10 +91,10 @@ class StreamWorker(QRunnable):
 
 
 class TTSWorker(QRunnable):
-    """Worker that runs TTS synthesis off the main thread."""
+    """Runs TTS synthesis off the main thread."""
 
     class Signals(QObject):
-        result = pyqtSignal(str)   # path to raw wav
+        result = pyqtSignal(str)
         error = pyqtSignal(str)
         finished = pyqtSignal()
 
@@ -126,6 +141,118 @@ class TTSWorker(QRunnable):
             self.signals.finished.emit()
 
 
+class KBBuildWorker(QRunnable):
+    """Chunks text and embeds each chunk to build a KnowledgeBase."""
+
+    class Signals(QObject):
+        progress = pyqtSignal(int, int)   # current, total
+        result = pyqtSignal(object)       # KnowledgeBase
+        error = pyqtSignal(str)
+        finished = pyqtSignal()
+
+    def __init__(
+        self,
+        client: OllamaClient,
+        text: str,
+        name: str,
+        embed_model: str,
+    ) -> None:
+        super().__init__()
+        self._client = client
+        self._text = text
+        self._name = name
+        self._embed_model = embed_model
+        self._cancelled = threading.Event()
+        self.signals = self.Signals()
+        self.setAutoDelete(True)
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+
+    @pyqtSlot()
+    def run(self) -> None:
+        try:
+            chunks = chunk_text(self._text)
+            if not chunks:
+                self.signals.error.emit("No text chunks found in editor content.")
+                return
+
+            embeddings: list[list[float]] = []
+            for i, chunk in enumerate(chunks):
+                if self._cancelled.is_set():
+                    return
+                emb = self._client.embed(self._embed_model, chunk)
+                embeddings.append(emb)
+                self.signals.progress.emit(i + 1, len(chunks))
+
+            kb = KnowledgeBase(
+                name=self._name,
+                embedding_model=self._embed_model,
+                chunks=chunks,
+                embeddings=np.array(embeddings, dtype=np.float32),
+            )
+            self.signals.result.emit(kb)
+        except OllamaError as exc:
+            self.signals.error.emit(str(exc))
+        except Exception as exc:
+            logger.exception("KB build error: %s", exc)
+            self.signals.error.emit(str(exc))
+        finally:
+            self.signals.finished.emit()
+
+
+class KBQueryWorker(QRunnable):
+    """Embeds a question, retrieves top chunks, and streams an answer."""
+
+    class Signals(QObject):
+        token = pyqtSignal(str)
+        error = pyqtSignal(str)
+        finished = pyqtSignal()
+
+    def __init__(
+        self,
+        client: OllamaClient,
+        kb: KnowledgeBase,
+        question: str,
+        chat_model: str,
+    ) -> None:
+        super().__init__()
+        self._client = client
+        self._kb = kb
+        self._question = question
+        self._chat_model = chat_model
+        self._cancelled = threading.Event()
+        self.signals = self.Signals()
+        self.setAutoDelete(True)
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+
+    @pyqtSlot()
+    def run(self) -> None:
+        try:
+            q_emb = self._client.embed(self._kb.embedding_model, self._question)
+            top_chunks = self._kb.query(q_emb)
+            system = build_rag_system_prompt(top_chunks)
+            for token in self._client.generate(
+                self._chat_model, self._question, system=system, stream=True
+            ):
+                if self._cancelled.is_set():
+                    break
+                self.signals.token.emit(token)
+        except OllamaError as exc:
+            self.signals.error.emit(str(exc))
+        except Exception as exc:
+            logger.exception("KB query error: %s", exc)
+            self.signals.error.emit(str(exc))
+        finally:
+            self.signals.finished.emit()
+
+
+# ---------------------------------------------------------------------------
+# Main window
+# ---------------------------------------------------------------------------
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -136,6 +263,9 @@ class MainWindow(QMainWindow):
         self._current_audio_path: Path | None = None
         self._stream_worker: StreamWorker | None = None
         self._generation_cancelled: bool = False
+        self._kb: KnowledgeBase | None = None
+        self._kb_build_worker: KBBuildWorker | None = None
+        self._kb_query_worker: KBQueryWorker | None = None
 
         self.setWindowTitle("Veritas Reader")
         self.resize(1200, 780)
@@ -168,7 +298,6 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # Left: import buttons
         open_btn = QPushButton("Open File…")
         open_btn.setToolTip("Open .md, .txt, or .docx file")
         open_btn.clicked.connect(self._on_open_file)
@@ -196,7 +325,6 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
 
-        # Right: voice selector + TTS button
         self._voice_selector = VoiceSelectorCombo(self._tts_engine)
         layout.addWidget(self._voice_selector)
 
@@ -230,16 +358,32 @@ class MainWindow(QMainWindow):
     def _build_content_area(self) -> QSplitter:
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # Left: main editor
         self._editor = EditorWidget()
         self._splitter.addWidget(self._editor)
 
-        # Right: AI panel (hidden by default)
+        # AI panel with tabs
         self._ai_panel = QWidget()
         al = QVBoxLayout(self._ai_panel)
         al.setContentsMargins(4, 0, 0, 0)
 
-        # Model + Generate row
+        self._ai_tabs = QTabWidget()
+        self._ai_tabs.addTab(self._build_generate_tab(), "Generate")
+        self._ai_tabs.addTab(self._build_kb_tab(), "KB Chat")
+        al.addWidget(self._ai_tabs)
+
+        self._ai_panel.hide()
+        self._splitter.addWidget(self._ai_panel)
+        self._splitter.setSizes([1, 0])
+
+        return self._splitter
+
+    def _build_generate_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        # Model + Generate + Stop row
         model_row = QWidget()
         ml = QHBoxLayout(model_row)
         ml.setContentsMargins(0, 0, 0, 0)
@@ -253,37 +397,103 @@ class MainWindow(QMainWindow):
         self._generate_btn.setToolTip("Send the prompt to the selected Ollama model")
         self._generate_btn.clicked.connect(self._on_generate)
         ml.addWidget(self._generate_btn)
-
         self._stop_btn = QPushButton("Stop")
         self._stop_btn.setToolTip("Stop generation")
         self._stop_btn.setEnabled(False)
         self._stop_btn.clicked.connect(self._on_stop_generation)
         ml.addWidget(self._stop_btn)
+        layout.addWidget(model_row)
 
-        al.addWidget(model_row)
-
-        al.addWidget(QLabel("Prompt"))
+        layout.addWidget(QLabel("Prompt"))
         self._prompt_input = QTextEdit()
         self._prompt_input.setPlaceholderText("Enter your prompt here…")
         self._prompt_input.setMaximumHeight(120)
-        al.addWidget(self._prompt_input)
+        layout.addWidget(self._prompt_input)
 
-        al.addWidget(QLabel("AI Output"))
+        layout.addWidget(QLabel("AI Output"))
         self._ai_output = QTextEdit()
         self._ai_output.setReadOnly(False)
         self._ai_output.setPlaceholderText("AI-generated text will appear here…")
-        al.addWidget(self._ai_output)
+        layout.addWidget(self._ai_output)
 
         copy_btn = QPushButton("Copy to Editor")
         copy_btn.setToolTip("Copy AI output into the main editor")
         copy_btn.clicked.connect(self._on_copy_ai_to_editor)
-        al.addWidget(copy_btn)
+        layout.addWidget(copy_btn)
 
-        self._ai_panel.hide()
-        self._splitter.addWidget(self._ai_panel)
-        self._splitter.setSizes([1, 0])
+        return tab
 
-        return self._splitter
+    def _build_kb_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        # Embed model + action buttons
+        ctrl_row = QWidget()
+        cl = QHBoxLayout(ctrl_row)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(4)
+        cl.addWidget(QLabel("Embed model:"))
+        self._embed_model_input = QLineEdit(DEFAULT_EMBED_MODEL)
+        self._embed_model_input.setFixedWidth(160)
+        self._embed_model_input.setToolTip(
+            "Ollama embedding model (run: ollama pull nomic-embed-text)"
+        )
+        cl.addWidget(self._embed_model_input)
+        self._kb_build_btn = QPushButton("Build from Editor")
+        self._kb_build_btn.setToolTip("Embed the current editor content into a knowledge base")
+        self._kb_build_btn.clicked.connect(self._on_build_kb)
+        cl.addWidget(self._kb_build_btn)
+        self._kb_load_btn = QPushButton("Load…")
+        self._kb_load_btn.setToolTip("Load a saved .vkb knowledge base file")
+        self._kb_load_btn.clicked.connect(self._on_load_kb)
+        cl.addWidget(self._kb_load_btn)
+        self._kb_save_btn = QPushButton("Save…")
+        self._kb_save_btn.setToolTip("Save the current knowledge base to disk")
+        self._kb_save_btn.setEnabled(False)
+        self._kb_save_btn.clicked.connect(self._on_save_kb)
+        cl.addWidget(self._kb_save_btn)
+        layout.addWidget(ctrl_row)
+
+        # KB status + progress
+        self._kb_status = QLabel("No knowledge base loaded.")
+        self._kb_status.setWordWrap(True)
+        layout.addWidget(self._kb_status)
+
+        self._kb_progress = QProgressBar()
+        self._kb_progress.setVisible(False)
+        self._kb_progress.setTextVisible(True)
+        layout.addWidget(self._kb_progress)
+
+        # Chat history
+        layout.addWidget(QLabel("Chat"))
+        self._kb_chat = QTextEdit()
+        self._kb_chat.setReadOnly(True)
+        self._kb_chat.setPlaceholderText(
+            "Build or load a knowledge base, then ask a question below…"
+        )
+        layout.addWidget(self._kb_chat)
+
+        # Question input + Ask + Stop
+        q_row = QWidget()
+        ql = QHBoxLayout(q_row)
+        ql.setContentsMargins(0, 0, 0, 0)
+        self._kb_question = QLineEdit()
+        self._kb_question.setPlaceholderText("Ask a question about the document…")
+        self._kb_question.returnPressed.connect(self._on_ask_kb)
+        ql.addWidget(self._kb_question)
+        self._kb_ask_btn = QPushButton("Ask")
+        self._kb_ask_btn.setEnabled(False)
+        self._kb_ask_btn.clicked.connect(self._on_ask_kb)
+        ql.addWidget(self._kb_ask_btn)
+        self._kb_stop_btn = QPushButton("Stop")
+        self._kb_stop_btn.setEnabled(False)
+        self._kb_stop_btn.clicked.connect(self._on_stop_kb_query)
+        ql.addWidget(self._kb_stop_btn)
+        layout.addWidget(q_row)
+
+        return tab
 
     def _build_player_bar(self) -> QWidget:
         container = QWidget()
@@ -435,6 +645,172 @@ class MainWindow(QMainWindow):
         if text:
             self._editor.set_text(text)
             self.statusBar().showMessage("AI output copied to editor.")
+
+    # ------------------------------------------------------------------
+    # Knowledge base — build
+    # ------------------------------------------------------------------
+
+    def _on_build_kb(self) -> None:
+        text = self._editor.get_text().strip()
+        if not text:
+            QMessageBox.warning(self, "Empty Editor", "Add text to the editor before building a KB.")
+            return
+
+        embed_model = self._embed_model_input.text().strip() or DEFAULT_EMBED_MODEL
+        name = self._file_name_input.get_name()
+
+        self._kb_build_btn.setEnabled(False)
+        self._kb_load_btn.setEnabled(False)
+        self._kb_save_btn.setEnabled(False)
+        self._kb_progress.setVisible(True)
+        self._kb_progress.setValue(0)
+        self._kb_status.setText(f"Building knowledge base '{name}'…")
+        self.statusBar().showMessage("Building knowledge base…")
+
+        self._kb_build_worker = KBBuildWorker(self._ollama, text, name, embed_model)
+        self._kb_build_worker.signals.progress.connect(self._on_kb_build_progress)
+        self._kb_build_worker.signals.result.connect(self._on_kb_built)
+        self._kb_build_worker.signals.error.connect(self._on_kb_build_error)
+        self._kb_build_worker.signals.finished.connect(self._on_kb_build_finished)
+        self._pool.start(self._kb_build_worker)
+
+    def _on_kb_build_progress(self, current: int, total: int) -> None:
+        self._kb_progress.setMaximum(total)
+        self._kb_progress.setValue(current)
+        self._kb_status.setText(f"Embedding chunk {current}/{total}…")
+
+    def _on_kb_built(self, kb: KnowledgeBase) -> None:
+        self._kb = kb
+        n = len(kb.chunks)
+        self._kb_status.setText(
+            f"KB ready: '{kb.name}' — {n} chunk{'s' if n != 1 else ''} "
+            f"({kb.embedding_model})"
+        )
+        self._kb_save_btn.setEnabled(True)
+        self._kb_ask_btn.setEnabled(True)
+        self._kb_chat.clear()
+        self.statusBar().showMessage(f"Knowledge base built: {n} chunks.")
+
+    def _on_kb_build_error(self, error: str) -> None:
+        QMessageBox.critical(self, "KB Build Error", error)
+        self._kb_status.setText("Build failed.")
+        self.statusBar().showMessage("KB build failed.")
+
+    def _on_kb_build_finished(self) -> None:
+        self._kb_build_btn.setEnabled(True)
+        self._kb_load_btn.setEnabled(True)
+        self._kb_progress.setVisible(False)
+        self._kb_build_worker = None
+
+    # ------------------------------------------------------------------
+    # Knowledge base — save / load
+    # ------------------------------------------------------------------
+
+    def _on_save_kb(self) -> None:
+        if self._kb is None:
+            return
+        self._settings.kb_dir.mkdir(parents=True, exist_ok=True)
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Knowledge Base",
+            str(self._settings.kb_dir / f"{self._kb.name}.vkb"),
+            "Veritas Knowledge Base (*.vkb)",
+        )
+        if not path:
+            return
+        try:
+            self._kb.save(Path(path))
+            self.statusBar().showMessage(f"KB saved: {path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Save Error", str(exc))
+
+    def _on_load_kb(self) -> None:
+        self._settings.kb_dir.mkdir(parents=True, exist_ok=True)
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Knowledge Base",
+            str(self._settings.kb_dir),
+            "Veritas Knowledge Base (*.vkb);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            self._kb = KnowledgeBase.load(Path(path))
+            n = len(self._kb.chunks)
+            self._kb_status.setText(
+                f"KB loaded: '{self._kb.name}' — {n} chunk{'s' if n != 1 else ''} "
+                f"({self._kb.embedding_model})"
+            )
+            self._kb_save_btn.setEnabled(True)
+            self._kb_ask_btn.setEnabled(True)
+            self._kb_chat.clear()
+            self.statusBar().showMessage(f"KB loaded: {Path(path).name}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Load Error", str(exc))
+
+    # ------------------------------------------------------------------
+    # Knowledge base — chat
+    # ------------------------------------------------------------------
+
+    def _on_ask_kb(self) -> None:
+        if self._kb is None:
+            return
+        question = self._kb_question.text().strip()
+        if not question:
+            return
+
+        model = self._model_selector.current_model()
+        if not model:
+            QMessageBox.warning(self, "No Model", "Select a model in the Generate tab first.")
+            return
+
+        self._kb_question.clear()
+        self._kb_ask_btn.setEnabled(False)
+        self._kb_stop_btn.setEnabled(True)
+        self.statusBar().showMessage("Querying knowledge base…")
+
+        # Append user turn to chat display
+        cursor = self._kb_chat.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        if self._kb_chat.toPlainText():
+            cursor.insertText("\n\n")
+        cursor.insertText(f"You: {question}\n\nAssistant: ")
+        self._kb_chat.setTextCursor(cursor)
+        self._kb_chat.ensureCursorVisible()
+
+        self._kb_query_worker = KBQueryWorker(self._ollama, self._kb, question, model)
+        self._kb_query_worker.signals.token.connect(self._on_kb_token)
+        self._kb_query_worker.signals.error.connect(self._on_kb_query_error)
+        self._kb_query_worker.signals.finished.connect(self._on_kb_query_finished)
+        self._pool.start(self._kb_query_worker)
+
+    def _on_stop_kb_query(self) -> None:
+        if self._kb_query_worker is not None:
+            self._kb_query_worker.cancel()
+        self._kb_stop_btn.setEnabled(False)
+        self.statusBar().showMessage("Stopping KB query…")
+
+    def _on_kb_token(self, token: str) -> None:
+        cursor = self._kb_chat.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.insertText(token)
+        self._kb_chat.setTextCursor(cursor)
+        self._kb_chat.ensureCursorVisible()
+
+    def _on_kb_query_error(self, error: str) -> None:
+        QMessageBox.critical(self, "KB Query Error", error)
+        self.statusBar().showMessage("KB query failed.")
+
+    def _on_kb_query_finished(self) -> None:
+        self._kb_ask_btn.setEnabled(True)
+        self._kb_stop_btn.setEnabled(False)
+        self._kb_query_worker = None
+        # Append separator after response
+        cursor = self._kb_chat.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.insertText("\n\n" + "─" * 40)
+        self._kb_chat.setTextCursor(cursor)
+        self.statusBar().showMessage("Ready")
 
     # ------------------------------------------------------------------
     # TTS synthesis

@@ -115,6 +115,34 @@ class OllamaClient:
     # Chat completion (streaming)
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Embeddings
+    # ------------------------------------------------------------------
+
+    def embed(self, model: str, text: str) -> list[float]:
+        """Return a dense embedding vector for the given text.
+
+        Args:
+            model: Embedding model name (e.g. 'nomic-embed-text').
+            text: Text to embed.
+        """
+        try:
+            resp = self._session.post(
+                f"{self.base_url}/api/embeddings",
+                json={"model": model, "prompt": text},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()["embedding"]
+        except requests.ConnectionError as exc:
+            raise OllamaError(f"Connection lost during embedding: {exc}") from exc
+        except requests.HTTPError as exc:
+            raise OllamaError(f"Ollama embedding error: {exc}") from exc
+
+    # ------------------------------------------------------------------
+    # Chat completion (streaming)
+    # ------------------------------------------------------------------
+
     def chat(
         self,
         model: str,

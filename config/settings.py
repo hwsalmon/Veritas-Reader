@@ -138,6 +138,10 @@ class AppSettings:
         import tempfile
         return Path(tempfile.gettempdir()) / "veritas_reader"
 
+    @property
+    def kb_dir(self) -> Path:
+        return Path(user_data_dir(APP_NAME)) / "knowledge_bases"
+
     # ------------------------------------------------------------------
     # Window geometry
     # ------------------------------------------------------------------
