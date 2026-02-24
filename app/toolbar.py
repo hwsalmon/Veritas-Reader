@@ -2,7 +2,7 @@
 
 import logging
 
-from PyQt6.QtCore import QRunnable, QThreadPool, QObject, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QRunnable, QThreadPool, QObject, Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -61,9 +61,10 @@ class Worker(QRunnable):
 class ModelSelectorCombo(QWidget):
     """Dropdown that lists installed Ollama models, with a refresh button."""
 
-    def __init__(self, ollama_client, parent=None) -> None:
+    def __init__(self, ollama_client, preferred: str = "llama3.2:latest", parent=None) -> None:
         super().__init__(parent)
         self._client = ollama_client
+        self._preferred = preferred
         self._pool = QThreadPool.globalInstance()
         self._build_ui()
         self.refresh()
@@ -102,6 +103,9 @@ class ModelSelectorCombo(QWidget):
         self._combo.setEnabled(True)
         if models:
             self._combo.addItems(models)
+            idx = self._combo.findText(self._preferred, Qt.MatchFlag.MatchContains)
+            if idx >= 0:
+                self._combo.setCurrentIndex(idx)
         else:
             self._combo.addItem("(no models found)")
         logger.debug("Loaded %d Ollama models.", len(models))

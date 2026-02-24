@@ -2,16 +2,19 @@
 
 import logging
 import tempfile
+import threading
 from pathlib import Path
 
 from PyQt6.QtCore import QRunnable, QThreadPool, QObject, pyqtSignal, pyqtSlot, Qt
 from PyQt6.QtWidgets import (
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QStatusBar,
     QTextEdit,
@@ -49,13 +52,19 @@ class StreamWorker(QRunnable):
         self._client = client
         self._model = model
         self._prompt = prompt
+        self._cancelled = threading.Event()
         self.signals = self.Signals()
         self.setAutoDelete(True)
+
+    def cancel(self) -> None:
+        self._cancelled.set()
 
     @pyqtSlot()
     def run(self) -> None:
         try:
             for token in self._client.generate(self._model, self._prompt, stream=True):
+                if self._cancelled.is_set():
+                    break
                 self.signals.token.emit(token)
         except OllamaError as exc:
             self.signals.error.emit(str(exc))
@@ -125,6 +134,8 @@ class MainWindow(QMainWindow):
         self._tts_engine = get_engine(self._settings.tts_engine)
         self._pool = QThreadPool.globalInstance()
         self._current_audio_path: Path | None = None
+        self._stream_worker: StreamWorker | None = None
+        self._generation_cancelled: bool = False
 
         self.setWindowTitle("Veritas Reader")
         self.resize(1200, 780)
@@ -142,9 +153,9 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(4)
 
-        root.addWidget(self._build_file_bar())
-        root.addWidget(self._build_model_bar())
-        root.addWidget(self._build_pacing_bar())
+        root.addWidget(self._build_top_bar())
+        root.addWidget(self._build_tts_pacing_bar())
+        root.addWidget(self._build_filename_bar())
         root.addWidget(self._build_content_area(), stretch=1)
         root.addWidget(self._build_player_bar())
         root.addWidget(self._build_export_bar())
@@ -152,11 +163,12 @@ class MainWindow(QMainWindow):
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("Ready")
 
-    def _build_file_bar(self) -> QWidget:
+    def _build_top_bar(self) -> QWidget:
         bar = QWidget()
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(0, 0, 0, 0)
 
+        # Left: import buttons
         open_btn = QPushButton("Open File…")
         open_btn.setToolTip("Open .md, .txt, or .docx file")
         open_btn.clicked.connect(self._on_open_file)
@@ -172,30 +184,21 @@ class MainWindow(QMainWindow):
         gdocs_btn.clicked.connect(self._on_import_gdocs)
         layout.addWidget(gdocs_btn)
 
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(sep)
+
+        self._ai_toggle_btn = QPushButton("✦ AI")
+        self._ai_toggle_btn.setToolTip("Show/hide AI panel")
+        self._ai_toggle_btn.clicked.connect(self._on_toggle_ai)
+        layout.addWidget(self._ai_toggle_btn)
+
         layout.addStretch()
 
-        self._file_name_input = FileNameInput()
-        layout.addWidget(self._file_name_input)
-
-        return bar
-
-    def _build_model_bar(self) -> QWidget:
-        bar = QWidget()
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        self._model_selector = ModelSelectorCombo(self._ollama)
-        layout.addWidget(self._model_selector)
-
+        # Right: voice selector + TTS button
         self._voice_selector = VoiceSelectorCombo(self._tts_engine)
         layout.addWidget(self._voice_selector)
-
-        layout.addStretch()
-
-        self._generate_btn = QPushButton("Generate with AI")
-        self._generate_btn.setToolTip("Send the prompt to the selected Ollama model")
-        self._generate_btn.clicked.connect(self._on_generate)
-        layout.addWidget(self._generate_btn)
 
         self._tts_btn = QPushButton("Synthesize TTS")
         self._tts_btn.setToolTip("Convert editor text to audio")
@@ -204,36 +207,67 @@ class MainWindow(QMainWindow):
 
         return bar
 
-    def _build_pacing_bar(self) -> QWidget:
+    def _build_tts_pacing_bar(self) -> QWidget:
         bar = QWidget()
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.addStretch()
         self._pacing = PacingControls(self._settings)
         layout.addWidget(self._pacing)
-        layout.addStretch()
+        return bar
+
+    def _build_filename_bar(self) -> QWidget:
+        bar = QWidget()
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._file_name_input = FileNameInput()
+        self._file_name_input.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        layout.addWidget(self._file_name_input)
         return bar
 
     def _build_content_area(self) -> QSplitter:
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
 
         # Left: main editor
-        editor_container = QWidget()
-        el = QVBoxLayout(editor_container)
-        el.setContentsMargins(0, 0, 0, 0)
-        el.addWidget(QLabel("Editor"))
         self._editor = EditorWidget()
-        el.addWidget(self._editor)
-        splitter.addWidget(editor_container)
+        self._splitter.addWidget(self._editor)
 
-        # Right: AI prompt + streamed output
-        ai_container = QWidget()
-        al = QVBoxLayout(ai_container)
-        al.setContentsMargins(0, 0, 0, 0)
-        al.addWidget(QLabel("AI Prompt"))
+        # Right: AI panel (hidden by default)
+        self._ai_panel = QWidget()
+        al = QVBoxLayout(self._ai_panel)
+        al.setContentsMargins(4, 0, 0, 0)
+
+        # Model + Generate row
+        model_row = QWidget()
+        ml = QHBoxLayout(model_row)
+        ml.setContentsMargins(0, 0, 0, 0)
+        self._model_selector = ModelSelectorCombo(
+            self._ollama,
+            preferred=self._settings.last_model or "llama3.2:latest",
+        )
+        ml.addWidget(self._model_selector)
+        ml.addStretch()
+        self._generate_btn = QPushButton("Generate")
+        self._generate_btn.setToolTip("Send the prompt to the selected Ollama model")
+        self._generate_btn.clicked.connect(self._on_generate)
+        ml.addWidget(self._generate_btn)
+
+        self._stop_btn = QPushButton("Stop")
+        self._stop_btn.setToolTip("Stop generation")
+        self._stop_btn.setEnabled(False)
+        self._stop_btn.clicked.connect(self._on_stop_generation)
+        ml.addWidget(self._stop_btn)
+
+        al.addWidget(model_row)
+
+        al.addWidget(QLabel("Prompt"))
         self._prompt_input = QTextEdit()
         self._prompt_input.setPlaceholderText("Enter your prompt here…")
         self._prompt_input.setMaximumHeight(120)
         al.addWidget(self._prompt_input)
+
         al.addWidget(QLabel("AI Output"))
         self._ai_output = QTextEdit()
         self._ai_output.setReadOnly(False)
@@ -245,9 +279,11 @@ class MainWindow(QMainWindow):
         copy_btn.clicked.connect(self._on_copy_ai_to_editor)
         al.addWidget(copy_btn)
 
-        splitter.addWidget(ai_container)
-        splitter.setSizes([640, 480])
-        return splitter
+        self._ai_panel.hide()
+        self._splitter.addWidget(self._ai_panel)
+        self._splitter.setSizes([1, 0])
+
+        return self._splitter
 
     def _build_player_bar(self) -> QWidget:
         container = QWidget()
@@ -280,6 +316,19 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
         return bar
+
+    # ------------------------------------------------------------------
+    # AI panel toggle
+    # ------------------------------------------------------------------
+
+    def _on_toggle_ai(self) -> None:
+        if self._ai_panel.isVisible():
+            self._ai_panel.hide()
+            self._ai_toggle_btn.setText("✦ AI")
+        else:
+            self._ai_panel.show()
+            self._splitter.setSizes([600, 420])
+            self._ai_toggle_btn.setText("✦ AI ✕")
 
     # ------------------------------------------------------------------
     # File import actions
@@ -345,14 +394,23 @@ class MainWindow(QMainWindow):
 
         self._settings.last_model = model
         self._ai_output.clear()
+        self._generation_cancelled = False
         self._generate_btn.setEnabled(False)
+        self._stop_btn.setEnabled(True)
         self.statusBar().showMessage(f"Generating with {model}…")
 
-        worker = StreamWorker(self._ollama, model, prompt)
-        worker.signals.token.connect(self._on_stream_token)
-        worker.signals.error.connect(self._on_stream_error)
-        worker.signals.finished.connect(self._on_stream_finished)
-        self._pool.start(worker)
+        self._stream_worker = StreamWorker(self._ollama, model, prompt)
+        self._stream_worker.signals.token.connect(self._on_stream_token)
+        self._stream_worker.signals.error.connect(self._on_stream_error)
+        self._stream_worker.signals.finished.connect(self._on_stream_finished)
+        self._pool.start(self._stream_worker)
+
+    def _on_stop_generation(self) -> None:
+        if self._stream_worker is not None:
+            self._generation_cancelled = True
+            self._stream_worker.cancel()
+        self._stop_btn.setEnabled(False)
+        self.statusBar().showMessage("Stopping generation…")
 
     def _on_stream_token(self, token: str) -> None:
         cursor = self._ai_output.textCursor()
@@ -367,7 +425,10 @@ class MainWindow(QMainWindow):
 
     def _on_stream_finished(self) -> None:
         self._generate_btn.setEnabled(True)
-        self.statusBar().showMessage("Generation complete.")
+        self._stop_btn.setEnabled(False)
+        self._stream_worker = None
+        msg = "Generation stopped." if self._generation_cancelled else "Generation complete."
+        self.statusBar().showMessage(msg)
 
     def _on_copy_ai_to_editor(self) -> None:
         text = self._ai_output.toPlainText().strip()
