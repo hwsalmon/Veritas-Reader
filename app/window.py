@@ -62,11 +62,18 @@ class StreamWorker(QRunnable):
         error = pyqtSignal(str)
         finished = pyqtSignal()
 
-    def __init__(self, client: OllamaClient, model: str, prompt: str) -> None:
+    def __init__(
+        self,
+        client: OllamaClient,
+        model: str,
+        prompt: str | None = None,
+        messages: list | None = None,
+    ) -> None:
         super().__init__()
         self._client = client
         self._model = model
         self._prompt = prompt
+        self._messages = messages   # if set, use chat() instead of generate()
         self._cancelled = threading.Event()
         self.signals = self.Signals()
         self.setAutoDelete(True)
@@ -77,7 +84,11 @@ class StreamWorker(QRunnable):
     @pyqtSlot()
     def run(self) -> None:
         try:
-            for token in self._client.generate(self._model, self._prompt, stream=True):
+            if self._messages is not None:
+                gen = self._client.chat(self._model, self._messages, stream=True)
+            else:
+                gen = self._client.generate(self._model, self._prompt, stream=True)
+            for token in gen:
                 if self._cancelled.is_set():
                     break
                 self.signals.token.emit(token)
@@ -270,6 +281,8 @@ class MainWindow(QMainWindow):
         self._current_file_path: Path | None = None
         self._autosave_path: Path | None = None
         self._dirty: bool = False
+        self._generate_chat_messages: list[dict] = []
+        self._stream_buffer: str = ""
 
         self.setWindowTitle("Veritas Editor")
         self.resize(1200, 780)
@@ -439,6 +452,28 @@ class MainWindow(QMainWindow):
         copy_btn.clicked.connect(self._on_copy_ai_to_editor)
         layout.addWidget(copy_btn)
 
+        # --- Follow-up chat row ---
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(sep)
+
+        followup_row = QWidget()
+        frl = QHBoxLayout(followup_row)
+        frl.setContentsMargins(0, 0, 0, 0)
+        frl.setSpacing(4)
+        frl.addWidget(QLabel("Follow-up:"))
+        self._followup_input = QLineEdit()
+        self._followup_input.setPlaceholderText("Ask a follow-up question…")
+        self._followup_input.returnPressed.connect(self._on_followup)
+        self._followup_input.setEnabled(False)
+        frl.addWidget(self._followup_input)
+        self._followup_btn = QPushButton("Ask")
+        self._followup_btn.setEnabled(False)
+        self._followup_btn.clicked.connect(self._on_followup)
+        frl.addWidget(self._followup_btn)
+        layout.addWidget(followup_row)
+
         return tab
 
     def _build_kb_tab(self) -> QWidget:
@@ -601,7 +636,10 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "File Error", str(exc))
 
     def _reopen_last_file(self) -> None:
-        """Silently reload the last opened file on startup."""
+        """Silently reload the last opened file on startup.
+
+        Prefers the last autosave over the original so edits are never lost.
+        """
         path_str = self._settings.last_file_path
         if not path_str:
             return
@@ -609,14 +647,26 @@ class MainWindow(QMainWindow):
         if not p.exists():
             return
         try:
-            text = read_file(p)
+            # Restore from the last autosave if it exists (more recent than original)
+            load_path = p
+            autosave_str = self._settings.last_autosave_path
+            if autosave_str:
+                autosave = Path(autosave_str)
+                if autosave.exists():
+                    load_path = autosave
+
+            text = read_file(load_path)
             self._editor.set_text(text)
             self._file_name_input.set_name(p.stem)
-            self._current_file_path = p
+            self._current_file_path = p          # always the original
             self._autosave_path = self._compute_autosave_path(p)
             self._dirty = False
-            self.statusBar().showMessage(f"Reopened: {p.name}")
-            logger.info("Reopened last file: %s | autosave → %s", p, self._autosave_path)
+            msg = f"Reopened: {p.name}"
+            if load_path != p:
+                msg += f"  (restored from {load_path.name})"
+            self.statusBar().showMessage(msg)
+            logger.info("Reopened %s | loaded from %s | next autosave → %s",
+                        p.name, load_path.name, self._autosave_path)
         except Exception as exc:
             logger.warning("Could not reopen last file %s: %s", p, exc)
 
@@ -646,6 +696,7 @@ class MainWindow(QMainWindow):
             self._autosave_path.parent.mkdir(parents=True, exist_ok=True)
             self._autosave_path.write_text(text, encoding="utf-8")
             self._dirty = False
+            self._settings.last_autosave_path = str(self._autosave_path)
             self.statusBar().showMessage(
                 f"Auto-saved: {self._autosave_path.name}", 3000
             )
@@ -695,12 +746,18 @@ class MainWindow(QMainWindow):
 
         self._settings.last_model = model
         self._ai_output.clear()
+        self._generate_chat_messages = [{"role": "user", "content": prompt}]
+        self._stream_buffer = ""
         self._generation_cancelled = False
         self._generate_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
+        self._followup_input.setEnabled(False)
+        self._followup_btn.setEnabled(False)
         self.statusBar().showMessage(f"Generating with {model}…")
 
-        self._stream_worker = StreamWorker(self._ollama, model, prompt)
+        self._stream_worker = StreamWorker(
+            self._ollama, model, messages=self._generate_chat_messages
+        )
         self._stream_worker.signals.token.connect(self._on_stream_token)
         self._stream_worker.signals.error.connect(self._on_stream_error)
         self._stream_worker.signals.finished.connect(self._on_stream_finished)
@@ -714,6 +771,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Stopping generation…")
 
     def _on_stream_token(self, token: str) -> None:
+        self._stream_buffer += token
         cursor = self._ai_output.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
         cursor.insertText(token)
@@ -725,11 +783,56 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Generation failed.")
 
     def _on_stream_finished(self) -> None:
+        # Capture assistant response in conversation history
+        if self._stream_buffer.strip():
+            self._generate_chat_messages.append(
+                {"role": "assistant", "content": self._stream_buffer.strip()}
+            )
+        self._stream_buffer = ""
         self._generate_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         self._stream_worker = None
+        # Enable follow-up only when there's a conversation to continue
+        has_chat = len(self._generate_chat_messages) >= 2
+        self._followup_input.setEnabled(has_chat)
+        self._followup_btn.setEnabled(has_chat)
         msg = "Generation stopped." if self._generation_cancelled else "Generation complete."
         self.statusBar().showMessage(msg)
+
+    def _on_followup(self) -> None:
+        question = self._followup_input.text().strip()
+        if not question or not self._generate_chat_messages:
+            return
+        model = self._model_selector.current_model()
+        if not model:
+            QMessageBox.warning(self, "No Model", "Please select an Ollama model first.")
+            return
+
+        self._generate_chat_messages.append({"role": "user", "content": question})
+        self._followup_input.clear()
+        self._stream_buffer = ""
+
+        # Append visual separator in the output area
+        cursor = self._ai_output.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.insertText(f"\n\n{'─' * 36}\n{question}\n{'─' * 36}\n\n")
+        self._ai_output.setTextCursor(cursor)
+        self._ai_output.ensureCursorVisible()
+
+        self._generation_cancelled = False
+        self._generate_btn.setEnabled(False)
+        self._stop_btn.setEnabled(True)
+        self._followup_input.setEnabled(False)
+        self._followup_btn.setEnabled(False)
+        self.statusBar().showMessage(f"Generating follow-up with {model}…")
+
+        self._stream_worker = StreamWorker(
+            self._ollama, model, messages=self._generate_chat_messages
+        )
+        self._stream_worker.signals.token.connect(self._on_stream_token)
+        self._stream_worker.signals.error.connect(self._on_stream_error)
+        self._stream_worker.signals.finished.connect(self._on_stream_finished)
+        self._pool.start(self._stream_worker)
 
     def _on_grammar_check(self, text: str) -> None:
         """Pre-fill AI panel with a grammar-check prompt and open it."""
