@@ -3,7 +3,9 @@
 import logging
 
 from PyQt6.QtCore import QPoint, QTimer, Qt, pyqtSignal
+from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
+    QApplication,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -106,6 +108,12 @@ class EditorTabWidget(QWidget):
         # Primary document tab (index 0) — always present, not closable
         self._add_editor_tab("", "Document")
 
+        # Ctrl+Shift+C — copy active tab contents to clipboard
+        copy_shortcut = QShortcut(QKeySequence("Ctrl+Shift+C"), self)
+        copy_shortcut.activated.connect(
+            lambda: self._copy_tab_by_index(self._tabs.currentIndex())
+        )
+
         # Defer initial position until Qt has finished laying everything out
         QTimer.singleShot(0, self._reposition_btns)
 
@@ -115,6 +123,8 @@ class EditorTabWidget(QWidget):
 
     def _on_tab_context_menu(self, idx: int, global_pos: QPoint) -> None:
         menu = QMenu(self)
+        copy_action = menu.addAction("Copy Tab Contents")
+        copy_action.setShortcut(QKeySequence("Ctrl+Shift+C"))
         clone_action = menu.addAction("Clone Tab")
         menu.addSeparator()
         close_action = menu.addAction("Close Tab")
@@ -122,7 +132,9 @@ class EditorTabWidget(QWidget):
 
         action = menu.exec(global_pos)
 
-        if action == clone_action:
+        if action == copy_action:
+            self._copy_tab_by_index(idx)
+        elif action == clone_action:
             self._clone_tab_by_index(idx)
         elif action == close_action:
             self._close_tab_with_warning(idx)
@@ -143,6 +155,17 @@ class EditorTabWidget(QWidget):
             if reply != QMessageBox.StandardButton.Yes:
                 return
         self._tabs.removeTab(idx)
+
+    def _copy_tab_by_index(self, idx: int) -> None:
+        widget = self._tabs.widget(idx)
+        if isinstance(widget, EditorWidget):
+            text = widget.get_text()
+        elif hasattr(widget, "_view"):          # BrowserTab — copy current URL
+            text = widget._view.url().toString()
+        else:
+            return
+        if text:
+            QApplication.clipboard().setText(text)
 
     def _clone_tab_by_index(self, idx: int) -> None:
         widget = self._tabs.widget(idx)
