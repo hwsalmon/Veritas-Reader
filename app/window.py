@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from PyQt6.QtCore import QRunnable, QThreadPool, QObject, pyqtSignal, pyqtSlot, Qt
+from PyQt6.QtCore import QRunnable, QThreadPool, QObject, QTimer, pyqtSignal, pyqtSlot, Qt
 from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -267,11 +267,20 @@ class MainWindow(QMainWindow):
         self._kb: KnowledgeBase | None = None
         self._kb_build_worker: KBBuildWorker | None = None
         self._kb_query_worker: KBQueryWorker | None = None
+        self._current_file_path: Path | None = None
+        self._autosave_path: Path | None = None
+        self._dirty: bool = False
 
         self.setWindowTitle("Veritas Editor")
         self.resize(1200, 780)
         self._build_ui()
         self._restore_geometry()
+        self._reopen_last_file()
+
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setInterval(60_000)  # every 60 seconds
+        self._autosave_timer.timeout.connect(self._autosave)
+        self._autosave_timer.start()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -293,6 +302,7 @@ class MainWindow(QMainWindow):
 
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("Ready")
+        self._editor.text_changed.connect(self._mark_dirty)
 
     def _build_top_bar(self) -> QWidget:
         bar = QWidget()
@@ -565,22 +575,82 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_open_file(self) -> None:
+        start_dir = self._settings.last_open_dir or str(self._settings.output_dir)
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Open Document",
-            str(self._settings.output_dir),
+            start_dir,
             "Documents (*.md *.txt *.docx);;All Files (*)",
         )
         if not path:
             return
         try:
-            text = read_file(Path(path))
+            p = Path(path)
+            text = read_file(p)
             self._editor.set_text(text)
-            stem = Path(path).stem
-            self._file_name_input.set_name(stem)
+            self._file_name_input.set_name(p.stem)
+            self._settings.last_file_path = path
+            self._settings.last_open_dir = str(p.parent)
+            self._current_file_path = p
+            self._autosave_path = self._compute_autosave_path(p)
+            self._dirty = False
             self.statusBar().showMessage(f"Opened: {path}")
+            logger.info("Session autosave target: %s", self._autosave_path)
         except FileHandlerError as exc:
             QMessageBox.critical(self, "File Error", str(exc))
+
+    def _reopen_last_file(self) -> None:
+        """Silently reload the last opened file on startup."""
+        path_str = self._settings.last_file_path
+        if not path_str:
+            return
+        p = Path(path_str)
+        if not p.exists():
+            return
+        try:
+            text = read_file(p)
+            self._editor.set_text(text)
+            self._file_name_input.set_name(p.stem)
+            self._current_file_path = p
+            self._autosave_path = self._compute_autosave_path(p)
+            self._dirty = False
+            self.statusBar().showMessage(f"Reopened: {p.name}")
+            logger.info("Reopened last file: %s | autosave → %s", p, self._autosave_path)
+        except Exception as exc:
+            logger.warning("Could not reopen last file %s: %s", p, exc)
+
+    def _compute_autosave_path(self, original: Path) -> Path:
+        """Return the next unused versioned path: stem-N.ext in same directory."""
+        stem = original.stem
+        suffix = original.suffix or ".md"
+        parent = original.parent
+        n = 1
+        while True:
+            candidate = parent / f"{stem}-{n}{suffix}"
+            if not candidate.exists():
+                return candidate
+            n += 1
+
+    def _mark_dirty(self) -> None:
+        self._dirty = True
+
+    def _autosave(self) -> None:
+        """Write a versioned auto-save copy if the editor content has changed."""
+        if self._autosave_path is None or not self._dirty:
+            return
+        text = self._editor.get_text()
+        if not text.strip():
+            return
+        try:
+            self._autosave_path.parent.mkdir(parents=True, exist_ok=True)
+            self._autosave_path.write_text(text, encoding="utf-8")
+            self._dirty = False
+            self.statusBar().showMessage(
+                f"Auto-saved: {self._autosave_path.name}", 3000
+            )
+            logger.debug("Auto-saved to %s", self._autosave_path)
+        except Exception as exc:
+            logger.warning("Auto-save failed: %s", exc)
 
     def _on_paste_text(self) -> None:
         from app.dialogs.paste_dialog import PasteDialog
@@ -1001,6 +1071,7 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(geom)
 
     def closeEvent(self, event) -> None:
+        self._autosave()  # flush any unsaved changes on exit
         self._settings.window_geometry = bytes(self.saveGeometry())
         self._settings.sync()
         super().closeEvent(event)

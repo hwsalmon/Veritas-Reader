@@ -143,6 +143,26 @@ class AppSettings:
         return Path(user_data_dir(APP_NAME)) / "knowledge_bases"
 
     # ------------------------------------------------------------------
+    # Recent files
+    # ------------------------------------------------------------------
+
+    @property
+    def last_file_path(self) -> str:
+        return self._qs.value("files/last_file_path", "")
+
+    @last_file_path.setter
+    def last_file_path(self, value: str) -> None:
+        self._qs.setValue("files/last_file_path", value)
+
+    @property
+    def last_open_dir(self) -> str:
+        return self._qs.value("files/last_open_dir", "")
+
+    @last_open_dir.setter
+    def last_open_dir(self, value: str) -> None:
+        self._qs.setValue("files/last_open_dir", value)
+
+    # ------------------------------------------------------------------
     # Window geometry
     # ------------------------------------------------------------------
 
