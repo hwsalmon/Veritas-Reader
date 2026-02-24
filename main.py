@@ -23,17 +23,23 @@ logger = logging.getLogger(__name__)
 
 def main() -> int:
     app = QApplication(sys.argv)
-    app.setApplicationName("Veritas Reader")
+    app.setApplicationName("Veritas Editor")
     app.setOrganizationName("VeritasReader")
-
-    # Apply a clean style
     app.setStyle("Fusion")
+
+    from config.settings import AppSettings
+    from app.theme import apply_dark, apply_light
+    settings = AppSettings()
+    if settings.dark_mode:
+        apply_dark(app)
+    else:
+        apply_light(app)
 
     from app.window import MainWindow
     window = MainWindow()
     window.show()
 
-    logger.info("Veritas Reader started.")
+    logger.info("Veritas Editor started.")
     return app.exec()
 
 

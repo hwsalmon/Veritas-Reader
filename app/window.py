@@ -262,12 +262,13 @@ class MainWindow(QMainWindow):
         self._pool = QThreadPool.globalInstance()
         self._current_audio_path: Path | None = None
         self._stream_worker: StreamWorker | None = None
+        self._tts_worker: TTSWorker | None = None
         self._generation_cancelled: bool = False
         self._kb: KnowledgeBase | None = None
         self._kb_build_worker: KBBuildWorker | None = None
         self._kb_query_worker: KBQueryWorker | None = None
 
-        self.setWindowTitle("Veritas Reader")
+        self.setWindowTitle("Veritas Editor")
         self.resize(1200, 780)
         self._build_ui()
         self._restore_geometry()
@@ -324,6 +325,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._ai_toggle_btn)
 
         layout.addStretch()
+
+        self._theme_btn = QPushButton("Dark" if not self._settings.dark_mode else "Light")
+        self._theme_btn.setToolTip("Toggle dark/light mode")
+        self._theme_btn.setFixedWidth(52)
+        self._theme_btn.clicked.connect(self._on_toggle_theme)
+        layout.addWidget(self._theme_btn)
 
         self._voice_selector = VoiceSelectorCombo(self._tts_engine)
         layout.addWidget(self._voice_selector)
@@ -539,6 +546,19 @@ class MainWindow(QMainWindow):
             self._ai_panel.show()
             self._splitter.setSizes([600, 420])
             self._ai_toggle_btn.setText("✦ AI ✕")
+
+    def _on_toggle_theme(self) -> None:
+        from PyQt6.QtWidgets import QApplication
+        from app.theme import apply_dark, apply_light
+        dark = not self._settings.dark_mode
+        self._settings.dark_mode = dark
+        app = QApplication.instance()
+        if dark:
+            apply_dark(app)
+            self._theme_btn.setText("Light")
+        else:
+            apply_light(app)
+            self._theme_btn.setText("Dark")
 
     # ------------------------------------------------------------------
     # File import actions
@@ -833,7 +853,7 @@ class MainWindow(QMainWindow):
         self._tts_btn.setEnabled(False)
         self.statusBar().showMessage("Synthesizing audio…")
 
-        worker = TTSWorker(
+        self._tts_worker = TTSWorker(
             self._tts_engine,
             text,
             raw_path,
@@ -843,9 +863,9 @@ class MainWindow(QMainWindow):
             pause_mdash_ms=self._pacing.mdash_ms(),
             pause_paragraph_ms=self._pacing.paragraph_ms(),
         )
-        worker.signals.result.connect(self._on_tts_complete)
-        worker.signals.error.connect(self._on_tts_error)
-        self._pool.start(worker)
+        self._tts_worker.signals.result.connect(self._on_tts_complete)
+        self._tts_worker.signals.error.connect(self._on_tts_error)
+        self._pool.start(self._tts_worker)
 
     def _on_tts_complete(self, raw_path_str: str) -> None:
         raw_path = Path(raw_path_str)
@@ -865,11 +885,13 @@ class MainWindow(QMainWindow):
 
     def _on_processing_complete(self, output_path) -> None:
         self._current_audio_path = Path(str(output_path))
+        self._tts_worker = None
         self._player.load(self._current_audio_path)
         self._tts_btn.setEnabled(True)
         self.statusBar().showMessage(f"Audio ready: {self._current_audio_path.name}")
 
     def _on_tts_error(self, error: str) -> None:
+        self._tts_worker = None
         QMessageBox.critical(self, "TTS Error", error)
         self._tts_btn.setEnabled(True)
         self.statusBar().showMessage("TTS failed.")

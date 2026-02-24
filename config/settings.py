@@ -155,5 +155,13 @@ class AppSettings:
     def window_geometry(self, value: bytes) -> None:
         self._qs.setValue("window/geometry", value)
 
+    @property
+    def dark_mode(self) -> bool:
+        return self._qs.value("ui/dark_mode", False, type=bool)
+
+    @dark_mode.setter
+    def dark_mode(self, value: bool) -> None:
+        self._qs.setValue("ui/dark_mode", value)
+
     def sync(self) -> None:
         self._qs.sync()
