@@ -1,4 +1,4 @@
-"""Main application window for Veritas Reader."""
+"""Main application window for Scriptum Veritas."""
 
 import logging
 import tempfile
@@ -290,7 +290,7 @@ class MainWindow(QMainWindow):
         self._kb_chat_messages: list[dict] = []
         self._kb_response_buffer: str = ""
 
-        self.setWindowTitle("Veritas Editor")
+        self.setWindowTitle("Scriptum Veritas")
         self.resize(1200, 780)
         self._build_ui()
         self._restore_geometry()
@@ -316,7 +316,8 @@ class MainWindow(QMainWindow):
 
         root.addWidget(self._build_top_bar())
         root.addWidget(self._build_player_bar())
-        root.addWidget(self._build_tts_pacing_bar())
+        self._tts_bar = self._build_tts_bar()
+        root.addWidget(self._tts_bar)
         root.addWidget(self._build_filename_bar())
         root.addWidget(self._build_content_area(), stretch=1)
 
@@ -324,14 +325,17 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Ready")
         self._editor.text_changed.connect(self._mark_dirty)
         self._editor.grammar_check_requested.connect(self._on_grammar_check)
+        self._editor.clone_requested.connect(self._on_clone_tab)
 
     def _build_menu_bar(self) -> None:
         mb = self.menuBar()
 
-        open_menu = mb.addMenu("Open")
-        open_menu.addAction("Open File…", self._on_open_file)
-        open_menu.addAction("Paste Text…", self._on_paste_text)
-        open_menu.addAction("Google Docs…", self._on_import_gdocs)
+        file_menu = mb.addMenu("File")
+        file_menu.addAction("Open File…", self._on_open_file)
+        file_menu.addAction("Paste Text…", self._on_paste_text)
+        file_menu.addAction("Google Docs…", self._on_import_gdocs)
+        file_menu.addSeparator()
+        file_menu.addAction("Choose Vault…", self._on_choose_vault)
 
         export_menu = mb.addMenu("Export")
         export_menu.addAction("Commit Version", self._on_commit_version)
@@ -342,46 +346,50 @@ class MainWindow(QMainWindow):
         export_menu.addSeparator()
         export_menu.addAction("Sync Google Docs…", self._on_sync_gdocs)
 
+        view_menu = mb.addMenu("View")
+        self._theme_action = view_menu.addAction("Dark Mode")
+        self._theme_action.setCheckable(True)
+        self._theme_action.setChecked(self._settings.dark_mode)
+        self._theme_action.triggered.connect(self._on_toggle_theme)
+
     def _build_top_bar(self) -> QWidget:
         bar = QWidget()
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.addStretch()
+
+        self._tts_toggle_btn = QPushButton("TTS")
+        self._tts_toggle_btn.setToolTip("Show/hide TTS controls")
+        self._tts_toggle_btn.clicked.connect(self._on_toggle_tts)
+        layout.addWidget(self._tts_toggle_btn)
 
         self._ai_toggle_btn = QPushButton("✦ AI")
         self._ai_toggle_btn.setToolTip("Show/hide AI panel")
         self._ai_toggle_btn.clicked.connect(self._on_toggle_ai)
         layout.addWidget(self._ai_toggle_btn)
 
-        vault_btn = QPushButton("Vault…")
-        vault_btn.setToolTip("Choose vault root folder for document projects")
-        vault_btn.clicked.connect(self._on_choose_vault)
-        layout.addWidget(vault_btn)
+        return bar
 
-        layout.addStretch()
-
-        self._theme_btn = QPushButton("Dark" if not self._settings.dark_mode else "Light")
-        self._theme_btn.setToolTip("Toggle dark/light mode")
-        self._theme_btn.setFixedWidth(52)
-        self._theme_btn.clicked.connect(self._on_toggle_theme)
-        layout.addWidget(self._theme_btn)
+    def _build_tts_bar(self) -> QWidget:
+        bar = QWidget()
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
 
         self._voice_selector = VoiceSelectorCombo(self._tts_engine)
         layout.addWidget(self._voice_selector)
 
-        self._tts_btn = QPushButton("Synthesize TTS")
+        self._pacing = PacingControls(self._settings)
+        layout.addWidget(self._pacing)
+
+        layout.addStretch()
+
+        self._tts_btn = QPushButton("Synthesize")
         self._tts_btn.setToolTip("Convert editor text to audio")
         self._tts_btn.clicked.connect(self._on_synthesize)
         layout.addWidget(self._tts_btn)
 
-        return bar
-
-    def _build_tts_pacing_bar(self) -> QWidget:
-        bar = QWidget()
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addStretch()
-        self._pacing = PacingControls(self._settings)
-        layout.addWidget(self._pacing)
+        bar.hide()
         return bar
 
     def _build_filename_bar(self) -> QWidget:
@@ -405,6 +413,27 @@ class MainWindow(QMainWindow):
         self._ai_panel = QWidget()
         al = QVBoxLayout(self._ai_panel)
         al.setContentsMargins(4, 0, 0, 0)
+
+        # AI service quick-launch buttons (open persistent browser tabs)
+        _AI_SERVICES = [
+            ("NotebookLM", "https://notebooklm.google.com"),
+            ("ChatGPT",    "https://chat.openai.com"),
+            ("Gemini",     "https://gemini.google.com"),
+            ("Claude AI",  "https://claude.ai"),
+        ]
+        web_row = QWidget()
+        wrl = QHBoxLayout(web_row)
+        wrl.setContentsMargins(0, 2, 0, 2)
+        wrl.setSpacing(4)
+        for label, url in _AI_SERVICES:
+            btn = QPushButton(label)
+            btn.setToolTip(f"Open {label}")
+            btn.clicked.connect(
+                lambda checked, u=url, l=label: self._open_ai_browser(u, l)
+            )
+            wrl.addWidget(btn)
+        wrl.addStretch()
+        al.addWidget(web_row)
 
         self._ai_tabs = QTabWidget()
         self._ai_tabs.addTab(self._build_generate_tab(), "Generate")
@@ -608,11 +637,47 @@ class MainWindow(QMainWindow):
     # AI panel toggle
     # ------------------------------------------------------------------
 
+    def _on_toggle_tts(self) -> None:
+        if self._tts_bar.isVisible():
+            self._tts_bar.hide()
+            self._tts_toggle_btn.setText("TTS")
+        else:
+            self._tts_bar.show()
+            self._tts_toggle_btn.setText("TTS ✕")
+
     def _on_toggle_ai(self) -> None:
         if self._ai_panel.isVisible():
             self._ai_panel.hide()
             self._ai_toggle_btn.setText("✦ AI")
         else:
+            self._ai_panel.show()
+            self._splitter.setSizes([600, 420])
+            self._ai_toggle_btn.setText("✦ AI ✕")
+
+    def _on_clone_tab(self) -> None:
+        """Clone active editor tab and save a vault version of its content."""
+        text = self._editor.clone_current_tab()
+        if self._vault and text.strip():
+            suffix = self._current_file_path.suffix if self._current_file_path else ".md"
+            version_path = self._vault.next_version_path(suffix)
+            try:
+                version_path.parent.mkdir(parents=True, exist_ok=True)
+                version_path.write_text(text, encoding="utf-8")
+                self.statusBar().showMessage(
+                    f"Cloned + version saved: {version_path.name}"
+                )
+            except Exception as exc:
+                logger.warning("Clone vault save failed: %s", exc)
+        else:
+            self.statusBar().showMessage("Tab cloned.")
+
+    def _open_ai_browser(self, url: str, title: str) -> None:
+        """Open a persistent browser tab in the AI panel."""
+        from app.web_tab import BrowserTab
+        browser = BrowserTab(url)
+        self._ai_tabs.addTab(browser, title)
+        self._ai_tabs.setCurrentIndex(self._ai_tabs.count() - 1)
+        if not self._ai_panel.isVisible():
             self._ai_panel.show()
             self._splitter.setSizes([600, 420])
             self._ai_toggle_btn.setText("✦ AI ✕")
@@ -625,10 +690,9 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if dark:
             apply_dark(app)
-            self._theme_btn.setText("Light")
         else:
             apply_light(app)
-            self._theme_btn.setText("Dark")
+        self._theme_action.setChecked(dark)
 
     # ------------------------------------------------------------------
     # File import actions

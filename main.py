@@ -1,4 +1,4 @@
-"""Veritas Reader — entry point.
+"""Scriptum Veritas — entry point.
 
 Run with:
     python main.py
@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 
+from PyQt6.QtWebEngineWidgets import QWebEngineView  # must precede QApplication
 from PyQt6.QtWidgets import QApplication
 
 # Configure logging before any app imports
@@ -23,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 def main() -> int:
     app = QApplication(sys.argv)
-    app.setApplicationName("Veritas Editor")
+    app.setApplicationName("Scriptum Veritas")
     app.setOrganizationName("VeritasReader")
     app.setStyle("Fusion")
 
@@ -39,7 +40,7 @@ def main() -> int:
     window = MainWindow()
     window.show()
 
-    logger.info("Veritas Editor started.")
+    logger.info("Scriptum Veritas started.")
     return app.exec()
 
 

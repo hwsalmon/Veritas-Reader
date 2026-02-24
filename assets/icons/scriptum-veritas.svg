@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Deep indigo background gradient -->
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#1c1f3a"/>
+      <stop offset="100%" stop-color="#2e3260"/>
+    </linearGradient>
+    <!-- Gold shimmer for S -->
+    <linearGradient id="gold" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#f5d080"/>
+      <stop offset="50%"  stop-color="#e8a820"/>
+      <stop offset="100%" stop-color="#c47d0a"/>
+    </linearGradient>
+    <!-- Silver-white for V -->
+    <linearGradient id="silver" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#c8cfea"/>
+    </linearGradient>
+    <!-- Subtle inner glow filter -->
+    <filter id="glow" x="-10%" y="-10%" width="120%" height="120%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="6" result="blur"/>
+      <feFlood flood-color="#6b7fd4" flood-opacity="0.5" result="color"/>
+      <feComposite in="color" in2="blur" operator="in" result="shadow"/>
+      <feMerge>
+        <feMergeNode in="shadow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Rounded square background -->
+  <rect x="0" y="0" width="512" height="512" rx="96" ry="96" fill="url(#bg)"/>
+
+  <!-- Thin gold border ring -->
+  <rect x="10" y="10" width="492" height="492" rx="88" ry="88"
+        fill="none" stroke="#e8a820" stroke-width="3" opacity="0.55"/>
+
+  <!-- Decorative thin horizontal rule above letters -->
+  <line x1="100" y1="148" x2="412" y2="148"
+        stroke="#e8a820" stroke-width="1.5" opacity="0.4"/>
+
+  <!-- "S" — gold, slightly left of centre -->
+  <text x="118" y="330"
+        font-family="Georgia, 'Times New Roman', serif"
+        font-size="228"
+        font-weight="bold"
+        font-style="italic"
+        fill="url(#gold)"
+        filter="url(#glow)"
+        letter-spacing="-4">S</text>
+
+  <!-- "V" — white/silver, overlaps S for depth -->
+  <text x="248" y="330"
+        font-family="Georgia, 'Times New Roman', serif"
+        font-size="228"
+        font-weight="bold"
+        font-style="italic"
+        fill="url(#silver)"
+        filter="url(#glow)"
+        opacity="0.95"
+        letter-spacing="-4">V</text>
+
+  <!-- Decorative thin horizontal rule below letters -->
+  <line x1="100" y1="360" x2="412" y2="360"
+        stroke="#e8a820" stroke-width="1.5" opacity="0.4"/>
+
+  <!-- Small subtitle text -->
+  <text x="256" y="415"
+        font-family="Georgia, 'Times New Roman', serif"
+        font-size="36"
+        font-weight="normal"
+        font-style="italic"
+        text-anchor="middle"
+        fill="#c8cfea"
+        opacity="0.6"
+        letter-spacing="6">scriptum veritas</text>
+</svg>

@@ -2,8 +2,10 @@
 
 import logging
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import QPoint, QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QMenu,
+    QMessageBox,
     QPushButton,
     QTabBar,
     QTabWidget,
@@ -14,6 +16,26 @@ from PyQt6.QtWidgets import (
 from app.editor import EditorWidget
 
 logger = logging.getLogger(__name__)
+
+
+class _TabBar(QTabBar):
+    """QTabBar subclass — emits layout_changed and context_menu_requested."""
+
+    layout_changed = pyqtSignal()
+    context_menu_requested = pyqtSignal(int, QPoint)   # (tab_index, global_pos)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setExpanding(False)
+
+    def tabLayoutChange(self) -> None:
+        super().tabLayoutChange()
+        self.layout_changed.emit()
+
+    def contextMenuEvent(self, event) -> None:
+        idx = self.tabAt(event.pos())
+        if idx >= 0:
+            self.context_menu_requested.emit(idx, self.mapToGlobal(event.pos()))
 
 
 class EditorTabWidget(QWidget):
@@ -32,6 +54,7 @@ class EditorTabWidget(QWidget):
 
     text_changed = pyqtSignal()
     grammar_check_requested = pyqtSignal(str)
+    clone_requested = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -43,22 +66,123 @@ class EditorTabWidget(QWidget):
         layout.setSpacing(0)
 
         self._tabs = QTabWidget()
-        self._tabs.setTabsClosable(True)
         self._tabs.setDocumentMode(True)
+        self._tabs.setTabsClosable(False)   # close via right-click menu only
         self._tabs.tabCloseRequested.connect(self._on_close_tab)
 
-        # "+" corner button to open a blank scratch tab
-        add_btn = QPushButton("+")
-        add_btn.setFixedSize(22, 22)
-        add_btn.setToolTip("New scratch tab")
-        add_btn.clicked.connect(lambda: self.open_in_new_tab("", "Draft"))
-        self._tabs.setCornerWidget(add_btn)
+        # Custom tab bar (must be installed before any addTab calls)
+        self._tab_bar = _TabBar()
+        self._tabs.setTabBar(self._tab_bar)
+
+        layout.addWidget(self._tabs)
+
+        # -------------------------------------------------------------------
+        # Action buttons as children of EditorTabWidget (NOT QTabBar).
+        # QTabBar clips its own children; by parenting to the outer widget we
+        # avoid that entirely and use coordinate-mapped positioning instead.
+        # -------------------------------------------------------------------
+        specs = [
+            ("+",  "New scratch tab",
+             lambda: self.open_in_new_tab("", "Draft")),
+            ("⊞",  "Clone tab — copies content to new tab and saves a vault version",
+             self.clone_requested),
+            ("S",  "Open Substack dashboard",
+             lambda: self.open_url_tab(
+                 "https://serenityfinch.substack.com/publish/home", "Substack")),
+        ]
+        self._overlay_btns: list[QPushButton] = []
+        for label, tip, handler in specs:
+            btn = QPushButton(label, self)
+            btn.setToolTip(tip)
+            btn.setCursor(Qt.CursorShape.ArrowCursor)
+            btn.clicked.connect(handler)
+            self._overlay_btns.append(btn)
+
+        # Reposition whenever tab layout changes or current tab switches
+        self._tab_bar.layout_changed.connect(self._reposition_btns)
+        self._tab_bar.context_menu_requested.connect(self._on_tab_context_menu)
+        self._tabs.currentChanged.connect(lambda _: self._reposition_btns())
 
         # Primary document tab (index 0) — always present, not closable
         self._add_editor_tab("", "Document")
-        self._set_tab_closable(0, False)
 
-        layout.addWidget(self._tabs)
+        # Defer initial position until Qt has finished laying everything out
+        QTimer.singleShot(0, self._reposition_btns)
+
+    # ------------------------------------------------------------------
+    # Right-click context menu
+    # ------------------------------------------------------------------
+
+    def _on_tab_context_menu(self, idx: int, global_pos: QPoint) -> None:
+        menu = QMenu(self)
+        clone_action = menu.addAction("Clone Tab")
+        menu.addSeparator()
+        close_action = menu.addAction("Close Tab")
+        close_action.setEnabled(idx != 0)   # primary tab is never closable
+
+        action = menu.exec(global_pos)
+
+        if action == clone_action:
+            self._clone_tab_by_index(idx)
+        elif action == close_action:
+            self._close_tab_with_warning(idx)
+
+    def _close_tab_with_warning(self, idx: int) -> None:
+        if idx == 0:
+            return
+        widget = self._tabs.widget(idx)
+        has_content = isinstance(widget, EditorWidget) and bool(widget.get_text().strip())
+        if has_content:
+            reply = QMessageBox.question(
+                self,
+                "Close Tab",
+                f"'{self._tabs.tabText(idx)}' has unsaved content. Close anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        self._tabs.removeTab(idx)
+
+    def _clone_tab_by_index(self, idx: int) -> None:
+        widget = self._tabs.widget(idx)
+        text = widget.get_text() if isinstance(widget, EditorWidget) else ""
+        title = self._tabs.tabText(idx) + " (copy)"
+        self._add_editor_tab(text, title)
+
+    # ------------------------------------------------------------------
+    # Overlay button positioning
+    # ------------------------------------------------------------------
+
+    def _reposition_btns(self) -> None:
+        tb = self._tab_bar
+        h = tb.height()
+        if h == 0:
+            return
+
+        bh = max(h - 4, 18)
+        bw = bh
+
+        count = tb.count()
+        x_in_tb = (tb.tabRect(count - 1).right() + 4) if count > 0 else 4
+
+        # Map from tab-bar-local coordinates into EditorTabWidget coordinates
+        origin: QPoint = tb.mapTo(self, QPoint(x_in_tb, (h - bh) // 2))
+        x, y = origin.x(), origin.y()
+
+        for btn in self._overlay_btns:
+            btn.setFixedSize(bw, bh)
+            btn.move(x, y)
+            btn.raise_()
+            x += bw + 2
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._reposition_btns()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._reposition_btns()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -73,11 +197,6 @@ class EditorTabWidget(QWidget):
         idx = self._tabs.addTab(editor, title)
         self._tabs.setCurrentIndex(idx)
         return idx
-
-    def _set_tab_closable(self, idx: int, closable: bool) -> None:
-        btn = self._tabs.tabBar().tabButton(idx, QTabBar.ButtonPosition.RightSide)
-        if btn:
-            btn.setVisible(closable)
 
     def _on_close_tab(self, idx: int) -> None:
         if idx == 0:
@@ -130,3 +249,17 @@ class EditorTabWidget(QWidget):
         """Return content of the primary document tab (index 0)."""
         editor = self._tabs.widget(0)
         return editor.get_text() if isinstance(editor, EditorWidget) else ""
+
+    def clone_current_tab(self) -> str:
+        """Copy active tab text into a new tab. Returns the cloned text."""
+        text = self.get_text()
+        title = self.current_tab_title + " (copy)"
+        self._add_editor_tab(text, title)
+        return text
+
+    def open_url_tab(self, url: str, title: str) -> None:
+        """Open an embedded browser tab at *url*."""
+        from app.web_tab import BrowserTab
+        browser = BrowserTab(url)
+        idx = self._tabs.addTab(browser, title)
+        self._tabs.setCurrentIndex(idx)
