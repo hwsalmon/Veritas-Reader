@@ -303,6 +303,7 @@ class MainWindow(QMainWindow):
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("Ready")
         self._editor.text_changed.connect(self._mark_dirty)
+        self._editor.grammar_check_requested.connect(self._on_grammar_check)
 
     def _build_top_bar(self) -> QWidget:
         bar = QWidget()
@@ -729,6 +730,27 @@ class MainWindow(QMainWindow):
         self._stream_worker = None
         msg = "Generation stopped." if self._generation_cancelled else "Generation complete."
         self.statusBar().showMessage(msg)
+
+    def _on_grammar_check(self, text: str) -> None:
+        """Pre-fill AI panel with a grammar-check prompt and open it."""
+        prompt = (
+            "You are a copy-editor specialising in US English. "
+            "Review the following text for grammar, punctuation, spelling, "
+            "and style issues. List each problem with its location (quote the "
+            "relevant phrase), explain the issue, and provide a corrected version. "
+            "Be concise. If no issues are found, say so.\n\n"
+            "TEXT TO REVIEW:\n\n"
+            f"{text}"
+        )
+        self._prompt_input.setPlainText(prompt)
+        # Open AI panel if hidden
+        if not self._ai_panel.isVisible():
+            self._ai_panel.show()
+            self._splitter.setSizes([600, 420])
+            self._ai_toggle_btn.setText("✦ AI ✕")
+        # Switch to Generate tab
+        self._ai_tabs.setCurrentIndex(0)
+        self._on_generate()
 
     def _on_copy_ai_to_editor(self) -> None:
         text = self._ai_output.toPlainText().strip()

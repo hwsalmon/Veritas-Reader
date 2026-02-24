@@ -2,22 +2,34 @@
 
 import logging
 import re
+from pathlib import Path
 
 import markdown2
 from markdownify import markdownify as html_to_md
+from platformdirs import user_data_dir
+from spellchecker import SpellChecker
 
 from PyQt6.QtCore import Qt, QEvent, pyqtSignal
 from PyQt6.QtGui import (
+    QAction,
     QFont,
-    QTextCharFormat,
+    QKeySequence,
+    QShortcut,
+    QSyntaxHighlighter,
     QTextBlockFormat,
-    QTextListFormat,
+    QTextCharFormat,
     QTextCursor,
+    QTextDocument,
+    QTextListFormat,
 )
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFrame,
     QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QStackedWidget,
@@ -26,9 +38,107 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+_APP_NAME = "VeritasReader"
+_USER_DICT_PATH = Path(user_data_dir(_APP_NAME)) / "user_dictionary.txt"
+_WORD_RE = re.compile(r"\b[A-Za-z]+(?:'[A-Za-z]+)*\b")
+
 logger = logging.getLogger(__name__)
 
 _STYLE_ITEMS = ["Normal text", "Heading 1", "Heading 2", "Heading 3"]
+
+# ---------------------------------------------------------------------------
+# Spell-checking helpers
+# ---------------------------------------------------------------------------
+
+def _load_spell_checker() -> SpellChecker:
+    """Load US-English SpellChecker, merging the user's custom word list."""
+    spell = SpellChecker(language="en")
+    if _USER_DICT_PATH.exists():
+        words = _USER_DICT_PATH.read_text(encoding="utf-8").split()
+        if words:
+            spell.word_frequency.load_words(words)
+    return spell
+
+
+def _add_to_user_dict(word: str, spell: SpellChecker) -> None:
+    """Persist a word to the user dictionary and update the live checker."""
+    word = word.lower()
+    spell.word_frequency.load_words([word])
+    _USER_DICT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with _USER_DICT_PATH.open("a", encoding="utf-8") as f:
+        f.write(word + "\n")
+    logger.debug("Added '%s' to user dictionary", word)
+
+
+class SpellCheckHighlighter(QSyntaxHighlighter):
+    """Underlines misspelled words in red.  Skips short tokens and ALL-CAPS."""
+
+    def __init__(self, document: QTextDocument, spell: SpellChecker) -> None:
+        super().__init__(document)
+        self._spell = spell
+        self._fmt = QTextCharFormat()
+        self._fmt.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SpellCheckUnderline)
+        self._fmt.setUnderlineColor(Qt.GlobalColor.red)
+
+    def highlightBlock(self, text: str) -> None:
+        for m in _WORD_RE.finditer(text):
+            word = m.group()
+            if len(word) < 3 or word.isupper():
+                continue
+            if self._spell.unknown([word]):
+                self.setFormat(m.start(), len(word), self._fmt)
+
+    def rehighlight_soon(self) -> None:
+        """Re-run highlighting (e.g. after user dict update)."""
+        self.rehighlight()
+
+
+class SpellCheckEdit(QPlainTextEdit):
+    """QPlainTextEdit with spell-check right-click context menu."""
+
+    def __init__(self, spell: SpellChecker, parent=None) -> None:
+        super().__init__(parent)
+        self._spell = spell
+        self._spell_highlighter: SpellCheckHighlighter | None = None
+
+    def set_spell_highlighter(self, h: "SpellCheckHighlighter") -> None:
+        self._spell_highlighter = h
+
+    def contextMenuEvent(self, event) -> None:
+        menu = self.createStandardContextMenu()
+        cursor = self.cursorForPosition(event.pos())
+        cursor.select(QTextCursor.SelectionType.WordUnderCursor)
+        word = cursor.selectedText()
+
+        if word and len(word) >= 3 and self._spell.unknown([word]):
+            menu.addSeparator()
+            candidates = sorted(self._spell.candidates(word) or [])[:6]
+            if candidates:
+                for suggestion in candidates:
+                    act = QAction(f"→ {suggestion}", menu)
+                    act.triggered.connect(
+                        lambda _, s=suggestion, c=cursor: (
+                            c.insertText(s),
+                            self.setTextCursor(c),
+                        )
+                    )
+                    menu.addAction(act)
+            else:
+                no_act = QAction("(No suggestions)", menu)
+                no_act.setEnabled(False)
+                menu.addAction(no_act)
+
+            menu.addSeparator()
+            add_act = QAction(f'Add "{word}" to dictionary', menu)
+            add_act.triggered.connect(lambda _, w=word: self._add_word(w))
+            menu.addAction(add_act)
+
+        menu.exec(event.globalPos())
+
+    def _add_word(self, word: str) -> None:
+        _add_to_user_dict(word, self._spell)
+        if self._spell_highlighter:
+            self._spell_highlighter.rehighlight_soon()
 # Font sizes for formatted-mode headings
 _HEADING_SIZES = {0: 12, 1: 24, 2: 18, 3: 14}
 
@@ -44,10 +154,12 @@ class EditorWidget(QWidget):
     """
 
     text_changed = pyqtSignal()
+    grammar_check_requested = pyqtSignal(str)   # emits editor text
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._mode = "markup"  # "markup" | "formatted"
+        self._spell = _load_spell_checker()
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -140,6 +252,16 @@ class EditorWidget(QWidget):
         div_btn.clicked.connect(self._insert_divider)
         tl.addWidget(div_btn)
 
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.VLine)
+        sep2.setFrameShadow(QFrame.Shadow.Sunken)
+        tl.addWidget(sep2)
+
+        grammar_btn = QPushButton("Grammar")
+        grammar_btn.setToolTip("Check grammar via AI (opens AI panel)")
+        grammar_btn.clicked.connect(self._on_check_grammar)
+        tl.addWidget(grammar_btn)
+
         tl.addStretch()
 
         # Mode toggle
@@ -152,11 +274,25 @@ class EditorWidget(QWidget):
 
         layout.addWidget(toolbar)
 
+        # --- Find / Replace bar (hidden by default) ---
+        self._find_bar = self._build_find_bar()
+        self._find_bar.hide()
+        layout.addWidget(self._find_bar)
+
+        # Keyboard shortcuts
+        find_sc = QShortcut(QKeySequence.StandardKey.Find, self)
+        find_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        find_sc.activated.connect(lambda: self._show_find(replace=False))
+
+        replace_sc = QShortcut(QKeySequence("Ctrl+H"), self)
+        replace_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        replace_sc.activated.connect(lambda: self._show_find(replace=True))
+
         # --- Stacked editor panes ---
         self._stack = QStackedWidget()
 
-        # Page 0: Markup (QPlainTextEdit)
-        self._markup_editor = QPlainTextEdit()
+        # Page 0: Markup (SpellCheckEdit — QPlainTextEdit subclass)
+        self._markup_editor = SpellCheckEdit(self._spell)
         self._markup_editor.setFont(QFont("Monospace", 11))
         self._markup_editor.setPlaceholderText(
             "Import a file, paste text, or generate content with AI to get started..."
@@ -164,6 +300,8 @@ class EditorWidget(QWidget):
         self._markup_editor.textChanged.connect(self.text_changed)
         self._markup_editor.cursorPositionChanged.connect(self._update_style_combo)
         self._markup_editor.installEventFilter(self)
+        markup_hl = SpellCheckHighlighter(self._markup_editor.document(), self._spell)
+        self._markup_editor.set_spell_highlighter(markup_hl)
 
         # Page 1: Formatted (QTextEdit)
         self._rich_editor = QTextEdit()
@@ -173,6 +311,7 @@ class EditorWidget(QWidget):
         )
         self._rich_editor.textChanged.connect(self.text_changed)
         self._rich_editor.cursorPositionChanged.connect(self._update_style_combo)
+        SpellCheckHighlighter(self._rich_editor.document(), self._spell)
 
         self._stack.addWidget(self._markup_editor)   # index 0
         self._stack.addWidget(self._rich_editor)     # index 1
@@ -262,18 +401,34 @@ class EditorWidget(QWidget):
     # ------------------------------------------------------------------
 
     def eventFilter(self, obj, event) -> bool:
-        if obj is self._markup_editor and event.type() == QEvent.Type.KeyPress:
+        if event.type() == QEvent.Type.KeyPress:
             key = event.key()
             mods = event.modifiers()
-            if key == Qt.Key.Key_Tab:
-                if mods & Qt.KeyboardModifier.ShiftModifier:
+
+            # Find/replace input key handling
+            if obj in (self._find_input, self._replace_input):
+                if key == Qt.Key.Key_Escape:
+                    self._hide_find()
+                    return True
+                if obj is self._find_input and key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                    if mods & Qt.KeyboardModifier.ShiftModifier:
+                        self._find_prev()
+                    else:
+                        self._find_next()
+                    return True
+
+            # Markup editor Tab / Shift+Tab
+            if obj is self._markup_editor:
+                if key == Qt.Key.Key_Tab:
+                    if mods & Qt.KeyboardModifier.ShiftModifier:
+                        self._decrease_indent()
+                    else:
+                        self._increase_indent()
+                    return True
+                if key == Qt.Key.Key_Backtab:
                     self._decrease_indent()
-                else:
-                    self._increase_indent()
-                return True
-            if key == Qt.Key.Key_Backtab:
-                self._decrease_indent()
-                return True
+                    return True
+
         return super().eventFilter(obj, event)
 
     # ------------------------------------------------------------------
@@ -479,6 +634,11 @@ class EditorWidget(QWidget):
         cursor.insertText(line[len(prefix):] if line.startswith(prefix) else prefix + line)
         self._markup_editor.setTextCursor(cursor)
 
+    def _on_check_grammar(self) -> None:
+        text = self.get_text().strip()
+        if text:
+            self.grammar_check_requested.emit(text)
+
     def _insert_divider(self) -> None:
         if self._mode == "markup":
             cursor = self._markup_editor.textCursor()
@@ -490,3 +650,190 @@ class EditorWidget(QWidget):
             cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
             cursor.insertHtml("<br/><hr/><br/>")
             self._rich_editor.setTextCursor(cursor)
+
+    # ------------------------------------------------------------------
+    # Find / Replace
+    # ------------------------------------------------------------------
+
+    def _active_editor(self) -> QPlainTextEdit | QTextEdit:
+        return self._markup_editor if self._mode == "markup" else self._rich_editor
+
+    def _build_find_bar(self) -> QWidget:
+        bar = QFrame()
+        bar.setFrameShape(QFrame.Shape.StyledPanel)
+        vl = QVBoxLayout(bar)
+        vl.setContentsMargins(4, 2, 4, 2)
+        vl.setSpacing(2)
+
+        # --- Find row ---
+        find_row = QWidget()
+        fl = QHBoxLayout(find_row)
+        fl.setContentsMargins(0, 0, 0, 0)
+        fl.setSpacing(4)
+
+        fl.addWidget(QLabel("Find:"))
+        self._find_input = QLineEdit()
+        self._find_input.setPlaceholderText("Search…")
+        self._find_input.textChanged.connect(self._on_find_text_changed)
+        self._find_input.installEventFilter(self)
+        fl.addWidget(self._find_input)
+
+        self._match_label = QLabel("")
+        self._match_label.setMinimumWidth(90)
+        fl.addWidget(self._match_label)
+
+        prev_btn = QPushButton("▲")
+        prev_btn.setFixedWidth(28)
+        prev_btn.setToolTip("Previous match  (Shift+Enter)")
+        prev_btn.clicked.connect(self._find_prev)
+        fl.addWidget(prev_btn)
+
+        next_btn = QPushButton("▼")
+        next_btn.setFixedWidth(28)
+        next_btn.setToolTip("Next match  (Enter)")
+        next_btn.clicked.connect(self._find_next)
+        fl.addWidget(next_btn)
+
+        self._case_cb = QCheckBox("Case")
+        self._case_cb.setToolTip("Match case")
+        self._case_cb.toggled.connect(self._on_find_text_changed)
+        fl.addWidget(self._case_cb)
+
+        self._word_cb = QCheckBox("Whole word")
+        self._word_cb.toggled.connect(self._on_find_text_changed)
+        fl.addWidget(self._word_cb)
+
+        close_btn = QPushButton("✕")
+        close_btn.setFixedWidth(24)
+        close_btn.setToolTip("Close  (Escape)")
+        close_btn.clicked.connect(self._hide_find)
+        fl.addWidget(close_btn)
+
+        vl.addWidget(find_row)
+
+        # --- Replace row (hidden when opened via Ctrl+F) ---
+        self._replace_row = QWidget()
+        rl = QHBoxLayout(self._replace_row)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(4)
+
+        rl.addWidget(QLabel("Replace:"))
+        self._replace_input = QLineEdit()
+        self._replace_input.setPlaceholderText("Replace with…")
+        self._replace_input.returnPressed.connect(self._replace_one)
+        self._replace_input.installEventFilter(self)
+        rl.addWidget(self._replace_input)
+
+        replace_btn = QPushButton("Replace")
+        replace_btn.setToolTip("Replace current match, then advance")
+        replace_btn.clicked.connect(self._replace_one)
+        rl.addWidget(replace_btn)
+
+        replace_all_btn = QPushButton("Replace All")
+        replace_all_btn.clicked.connect(self._replace_all)
+        rl.addWidget(replace_all_btn)
+
+        rl.addStretch()
+        vl.addWidget(self._replace_row)
+
+        return bar
+
+    def _show_find(self, replace: bool = False) -> None:
+        self._find_bar.show()
+        self._replace_row.setVisible(replace)
+        self._find_input.selectAll()
+        self._find_input.setFocus()
+        self._on_find_text_changed()
+
+    def _hide_find(self) -> None:
+        self._find_bar.hide()
+        self._active_editor().setFocus()
+
+    def _find_flags(self) -> QTextDocument.FindFlags:
+        flags = QTextDocument.FindFlags()
+        if self._case_cb.isChecked():
+            flags |= QTextDocument.FindFlag.FindCaseSensitively
+        if self._word_cb.isChecked():
+            flags |= QTextDocument.FindFlag.FindWholeWords
+        return flags
+
+    def _count_matches(self, text: str) -> int:
+        doc = self._active_editor().document()
+        flags = self._find_flags()
+        count = 0
+        cursor = QTextCursor(doc)
+        while True:
+            cursor = doc.find(text, cursor, flags)
+            if cursor.isNull():
+                break
+            count += 1
+        return count
+
+    def _on_find_text_changed(self) -> None:
+        text = self._find_input.text()
+        if not text:
+            self._match_label.setText("")
+            return
+        count = self._count_matches(text)
+        self._match_label.setText("No results" if count == 0 else f"{count} match{'es' if count != 1 else ''}")
+        # Jump to first result from top
+        editor = self._active_editor()
+        cursor = editor.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        editor.setTextCursor(cursor)
+        editor.find(text, self._find_flags())
+
+    def _find_next(self) -> None:
+        text = self._find_input.text()
+        if not text:
+            return
+        editor = self._active_editor()
+        if not editor.find(text, self._find_flags()):
+            # Wrap to top
+            cursor = editor.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+            editor.setTextCursor(cursor)
+            editor.find(text, self._find_flags())
+
+    def _find_prev(self) -> None:
+        text = self._find_input.text()
+        if not text:
+            return
+        flags = self._find_flags() | QTextDocument.FindFlag.FindBackward
+        editor = self._active_editor()
+        if not editor.find(text, flags):
+            # Wrap to bottom
+            cursor = editor.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            editor.setTextCursor(cursor)
+            editor.find(text, flags)
+
+    def _replace_one(self) -> None:
+        text = self._find_input.text()
+        replacement = self._replace_input.text()
+        if not text:
+            return
+        editor = self._active_editor()
+        cursor = editor.textCursor()
+        if cursor.hasSelection():
+            selected = cursor.selectedText()
+            match = selected == text if self._case_cb.isChecked() else selected.lower() == text.lower()
+            if match:
+                cursor.insertText(replacement)
+        self._find_next()
+
+    def _replace_all(self) -> None:
+        text = self._find_input.text()
+        replacement = self._replace_input.text()
+        if not text:
+            return
+        editor = self._active_editor()
+        flags = self._find_flags()
+        cursor = editor.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        editor.setTextCursor(cursor)
+        count = 0
+        while editor.find(text, flags):
+            editor.textCursor().insertText(replacement)
+            count += 1
+        self._match_label.setText(f"Replaced {count}" if count else "No matches")
