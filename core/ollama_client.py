@@ -122,18 +122,32 @@ class OllamaClient:
     def embed(self, model: str, text: str) -> list[float]:
         """Return a dense embedding vector for the given text.
 
+        Tries the current /api/embed endpoint first, falls back to the
+        legacy /api/embeddings endpoint for older Ollama versions.
+
         Args:
             model: Embedding model name (e.g. 'nomic-embed-text').
             text: Text to embed.
         """
         try:
+            # Current Ollama API (≥0.1.26)
             resp = self._session.post(
-                f"{self.base_url}/api/embeddings",
-                json={"model": model, "prompt": text},
+                f"{self.base_url}/api/embed",
+                json={"model": model, "input": text},
                 timeout=30,
             )
+            if resp.status_code == 404:
+                # Fall back to legacy endpoint
+                resp = self._session.post(
+                    f"{self.base_url}/api/embeddings",
+                    json={"model": model, "prompt": text},
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                return resp.json()["embedding"]
             resp.raise_for_status()
-            return resp.json()["embedding"]
+            # New API returns {"embeddings": [[...]]}
+            return resp.json()["embeddings"][0]
         except requests.ConnectionError as exc:
             raise OllamaError(f"Connection lost during embedding: {exc}") from exc
         except requests.HTTPError as exc:
