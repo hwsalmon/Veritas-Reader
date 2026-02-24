@@ -153,6 +153,18 @@ class AppSettings:
         return Path(user_data_dir(APP_NAME)) / "knowledge_bases"
 
     # ------------------------------------------------------------------
+    # Renderer (GPT-SoVITS-v2)
+    # ------------------------------------------------------------------
+
+    @property
+    def render_profile_path(self) -> str:
+        return self._qs.value("renderer/profile_path", "")
+
+    @render_profile_path.setter
+    def render_profile_path(self, value: str) -> None:
+        self._qs.setValue("renderer/profile_path", value)
+
+    # ------------------------------------------------------------------
     # Recent files
     # ------------------------------------------------------------------
 

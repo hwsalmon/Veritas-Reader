@@ -263,6 +263,46 @@ class KBQueryWorker(QRunnable):
             self.signals.finished.emit()
 
 
+class RenderWorker(QRunnable):
+    """Runs GPT-SoVITS-v2 batch render off the main thread."""
+
+    class Signals(QObject):
+        progress = pyqtSignal(int, int, str)   # current, total, filename
+        result   = pyqtSignal(list)            # list[str] of written paths
+        error    = pyqtSignal(str)
+        finished = pyqtSignal()
+
+    def __init__(self, paragraphs: list[str], output_prefix: Path, profile_path: str) -> None:
+        super().__init__()
+        self._paragraphs    = paragraphs
+        self._output_prefix = output_prefix
+        self._profile_path  = profile_path
+        self.signals = self.Signals()
+        self.setAutoDelete(True)
+
+    @pyqtSlot()
+    def run(self) -> None:
+        written: list[str] = []
+        try:
+            from core.renderer import export_to_wav
+            paras = [p for p in self._paragraphs if p.strip()]
+            total = len(paras)
+            for idx, para in enumerate(paras, start=1):
+                out = (
+                    self._output_prefix.parent
+                    / f"{self._output_prefix.name}_{idx:02d}.wav"
+                )
+                self.signals.progress.emit(idx, total, out.name)
+                export_to_wav(para, out, self._profile_path)
+                written.append(str(out))
+            self.signals.result.emit(written)
+        except Exception as exc:
+            logger.exception("Render error: %s", exc)
+            self.signals.error.emit(str(exc))
+        finally:
+            self.signals.finished.emit()
+
+
 # ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
@@ -281,6 +321,7 @@ class MainWindow(QMainWindow):
         self._kb: KnowledgeBase | None = None
         self._kb_build_worker: KBBuildWorker | None = None
         self._kb_query_worker: KBQueryWorker | None = None
+        self._render_worker: RenderWorker | None = None
         self._current_file_path: Path | None = None
         self._autosave_path: Path | None = None
         self._dirty: bool = False
@@ -388,6 +429,22 @@ class MainWindow(QMainWindow):
         self._tts_btn.setToolTip("Convert editor text to audio")
         self._tts_btn.clicked.connect(self._on_synthesize)
         layout.addWidget(self._tts_btn)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(sep)
+
+        self._render_profile_btn = QPushButton("⋯")
+        self._render_profile_btn.setFixedWidth(28)
+        self._render_profile_btn.clicked.connect(self._on_pick_render_profile)
+        self._update_render_profile_tooltip()
+        layout.addWidget(self._render_profile_btn)
+
+        self._render_btn = QPushButton("Render")
+        self._render_btn.setToolTip("Batch-render editor text to WAV via GPT-SoVITS-v2")
+        self._render_btn.clicked.connect(self._on_render)
+        layout.addWidget(self._render_btn)
 
         bar.hide()
         return bar
@@ -1333,6 +1390,99 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "TTS Error", error)
         self._tts_btn.setEnabled(True)
         self.statusBar().showMessage("TTS failed.")
+
+    # ------------------------------------------------------------------
+    # GPT-SoVITS-v2 offline render
+    # ------------------------------------------------------------------
+
+    def _update_render_profile_tooltip(self) -> None:
+        path = self._settings.render_profile_path
+        if path:
+            tip = f"Voice profile: {Path(path).name}\nClick to change"
+        else:
+            tip = "No voice profile set — click to choose"
+        self._render_profile_btn.setToolTip(tip)
+
+    def _on_pick_render_profile(self) -> None:
+        start = self._settings.render_profile_path or str(Path.home())
+        folder = QFileDialog.getExistingDirectory(
+            self, "Choose Voice Profile Directory", start
+        )
+        if not folder:
+            return
+        self._settings.render_profile_path = folder
+        self._update_render_profile_tooltip()
+        self.statusBar().showMessage(f"Render profile: {Path(folder).name}")
+
+    def _on_render(self) -> None:
+        profile_path = self._settings.render_profile_path
+        if not profile_path:
+            QMessageBox.warning(
+                self,
+                "No Voice Profile",
+                "Choose a GPT-SoVITS-v2 voice profile first (⋯ button).",
+            )
+            return
+
+        text = self._editor.get_text().strip()
+        if not text:
+            QMessageBox.warning(self, "Empty Editor", "Nothing to render.")
+            return
+
+        # Split into paragraphs on blank lines; fall back to single-newline split
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+        if len(paragraphs) <= 1:
+            paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
+
+        base_name = self._file_name_input.get_name() or "render"
+        default_dir = str(
+            self._vault.audio_dir if self._vault else self._settings.output_dir
+        )
+        out_dir = QFileDialog.getExistingDirectory(
+            self, "Choose Output Directory for Rendered WAVs", default_dir
+        )
+        if not out_dir:
+            return
+
+        output_prefix = Path(out_dir) / base_name
+
+        self._render_btn.setEnabled(False)
+        self._render_btn.setText("Rendering…")
+        self.statusBar().showMessage(
+            f"Rendering {len(paragraphs)} paragraph(s) via GPT-SoVITS-v2…"
+        )
+
+        self._render_worker = RenderWorker(paragraphs, output_prefix, profile_path)
+        self._render_worker.signals.progress.connect(self._on_render_progress)
+        self._render_worker.signals.result.connect(self._on_render_done)
+        self._render_worker.signals.error.connect(self._on_render_error)
+        self._render_worker.signals.finished.connect(
+            lambda: self._render_btn.__setattr__("_finished", True)
+        )
+        self._pool.start(self._render_worker)
+
+    def _on_render_progress(self, current: int, total: int, filename: str) -> None:
+        self._render_btn.setText(f"Rendering {current}/{total}")
+        self.statusBar().showMessage(f"Rendering {current}/{total}: {filename}")
+
+    def _on_render_done(self, paths: list) -> None:
+        self._render_worker = None
+        self._render_btn.setEnabled(True)
+        self._render_btn.setText("Render")
+        n = len(paths)
+        self.statusBar().showMessage(f"Render complete — {n} file{'s' if n != 1 else ''} written.")
+        QMessageBox.information(
+            self,
+            "Render Complete",
+            f"{n} WAV file{'s' if n != 1 else ''} written to:\n{Path(paths[0]).parent}",
+        )
+
+    def _on_render_error(self, error: str) -> None:
+        self._render_worker = None
+        self._render_btn.setEnabled(True)
+        self._render_btn.setText("Render")
+        QMessageBox.critical(self, "Render Error", error)
+        self.statusBar().showMessage("Render failed.")
 
     # ------------------------------------------------------------------
     # Export
