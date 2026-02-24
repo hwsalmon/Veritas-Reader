@@ -26,7 +26,7 @@ A profile is a directory with a profile.json and its referenced files:
 
     my_voice/
     ├── profile.json
-    ├── ref_audio.wav          # 3-10 s clean reference clip
+    ├── ref_audio.wav          # 3-10 s clean reference clip (.mp3/.flac/.ogg also accepted)
     ├── gpt_model.ckpt         # GPT-SoVITS GPT weights
     └── sovits_model.pth       # GPT-SoVITS SoVITS weights
 
@@ -312,6 +312,54 @@ def _to_int16(audio: np.ndarray) -> np.ndarray:
     return (clipped * 32767).astype(np.int16)
 
 
+def _ensure_wav(ref_audio: Path) -> Path:
+    """Return a 16-bit 44.1 kHz mono WAV ready for GPT-SoVITS.
+
+    If *ref_audio* is already a .wav file it is returned unchanged.
+    Any other format (mp3, flac, ogg, m4a, aac …) is decoded via pydub
+    and written to a sibling temp file ``<stem>_ref_converted.wav`` so the
+    original is never modified.
+
+    pydub delegates to ffmpeg, so every format ffmpeg understands is
+    automatically supported — including MP3 with its variable-bitrate
+    header, M4A/AAC containers, etc.
+
+    Why not pass MP3 directly to GPT-SoVITS?
+    - ``soundfile`` (used by some GPT-SoVITS builds) cannot read MP3.
+    - MP3 compression artefacts degrade the voice encoder's input quality.
+    - Converting to uncompressed PCM first is the safest common denominator.
+    """
+    if ref_audio.suffix.lower() == ".wav":
+        return ref_audio
+
+    out_path = ref_audio.with_name(ref_audio.stem + "_ref_converted.wav")
+    if out_path.exists():
+        logger.debug("Using cached converted reference: %s", out_path.name)
+        return out_path
+
+    logger.info(
+        "Converting reference audio %s → WAV (pydub/ffmpeg)…", ref_audio.name
+    )
+    try:
+        from pydub import AudioSegment
+    except ImportError as exc:
+        raise ImportError(
+            "pydub is required to convert non-WAV reference audio. "
+            "Install it with: pip install pydub"
+        ) from exc
+
+    audio = AudioSegment.from_file(str(ref_audio))
+    audio = (
+        audio
+        .set_channels(1)           # mono
+        .set_frame_rate(44100)     # 44.1 kHz — GPT-SoVITS handles downsampling
+        .set_sample_width(2)       # 16-bit PCM
+    )
+    audio.export(str(out_path), format="wav")
+    logger.info("Saved converted reference: %s", out_path.name)
+    return out_path
+
+
 def _write_wav(audio: np.ndarray, sample_rate: int, path: Path) -> None:
     """Write 16-bit mono PCM .wav using the stdlib wave module (zero deps)."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -362,8 +410,10 @@ def export_to_wav(
     logger.info("Synthesising → %s", output_path.name)
 
     try:
+        ref_wav = _ensure_wav(profile.ref_audio)
+
         gen = _cache.get_tts_wav(
-            ref_wav_path      = str(profile.ref_audio),
+            ref_wav_path      = str(ref_wav),
             prompt_text       = profile.ref_text,
             prompt_language   = profile.ref_language,
             text              = text,
