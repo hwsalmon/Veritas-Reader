@@ -6,10 +6,10 @@ written directly to .wav — no playback, no soundcard involvement.
 
 Prerequisites
 -------------
-1.  ROCm-enabled PyTorch (Framework 16 / Radeon 780M = gfx1103):
+1.  ROCm-enabled PyTorch (Radeon 860M = gfx1152):
 
         pip install torch torchaudio \\
-            --index-url https://download.pytorch.org/whl/rocm6.2
+            --index-url https://download.pytorch.org/whl/rocm6.4
 
 2.  GPT-SoVITS-v2 repository cloned somewhere on disk:
 
@@ -72,11 +72,11 @@ logger = logging.getLogger(__name__)
 # ROCm / device bootstrap
 # Must happen BEFORE torch is imported so HIP picks up the override.
 # Radeon 780M  = gfx1103  →  HSA_OVERRIDE_GFX_VERSION 11.0.3
-# Radeon 860M  = gfx1152  →  HSA_OVERRIDE_GFX_VERSION 11.5.2  (set elsewhere)
+# Radeon 860M  = gfx1152  →  HSA_OVERRIDE_GFX_VERSION 11.5.2
 # Set the env var in your launch script if you need a different value; this
 # module only sets a default so it is safe to import without clobbering yours.
 # ---------------------------------------------------------------------------
-os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "11.0.3")
+os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "11.5.2")
 
 try:
     import torch
@@ -137,6 +137,11 @@ def load_profile(profile_path: str | Path) -> VoiceProfile:
         sv_path = Path(sv_raw).expanduser().resolve()
     elif os.environ.get("GPTSOVITS_PATH"):
         sv_path = Path(os.environ["GPTSOVITS_PATH"]).expanduser().resolve()
+    else:
+        # Default: ~/GPT-SoVITS (where install.sh clones the repo)
+        default = Path.home() / "GPT-SoVITS"
+        if default.exists():
+            sv_path = default
 
     return VoiceProfile(
         gpt_model      = gpt_path,
@@ -176,18 +181,25 @@ def _get_device() -> str:
 
 
 def _ensure_gptsovits_on_path(profile: VoiceProfile) -> None:
-    """Add GPT-SoVITS repo to sys.path if not already present."""
+    """Add GPT-SoVITS repo to sys.path and set CWD to its root.
+
+    GPT-SoVITS uses relative paths throughout (e.g. "GPT_SoVITS/pretrained_models/…")
+    so the process working directory must be the repo root when importing it.
+    """
     sv_path = profile.gptsovits_path
     if sv_path is None:
         raise EnvironmentError(
-            "GPT-SoVITS path is not configured.\n"
-            "Set GPTSOVITS_PATH environment variable or add 'gptsovits_path' "
-            "to profile.json."
+            "GPT-SoVITS path is not configured and ~/GPT-SoVITS does not exist.\n"
+            "Clone the repo: git clone https://github.com/RVC-Boss/GPT-SoVITS ~/GPT-SoVITS\n"
+            "Or set GPTSOVITS_PATH env var or add 'gptsovits_path' to profile.json."
         )
     sv_str = str(sv_path)
     if sv_str not in sys.path:
         sys.path.insert(0, sv_str)
         logger.debug("Added GPT-SoVITS to sys.path: %s", sv_str)
+    # GPT-SoVITS reads config.py with relative model paths — must run from repo root
+    os.chdir(sv_path)
+    logger.debug("CWD set to GPT-SoVITS root: %s", sv_path)
 
 
 def _load_models(profile: VoiceProfile) -> None:
