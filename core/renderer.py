@@ -194,12 +194,22 @@ def _ensure_gptsovits_on_path(profile: VoiceProfile) -> None:
             "Or set GPTSOVITS_PATH env var or add 'gptsovits_path' to profile.json."
         )
     sv_str = str(sv_path)
+    # Add repo root (for `import config`, `from GPT_SoVITS.inference_webui import …`)
     if sv_str not in sys.path:
         sys.path.insert(0, sv_str)
-        logger.debug("Added GPT-SoVITS to sys.path: %s", sv_str)
+        logger.debug("Added GPT-SoVITS root to sys.path: %s", sv_str)
+    # Add GPT_SoVITS package dir (for `from text.LangSegmenter import …` inside inference_webui)
+    inner = str(sv_path / "GPT_SoVITS")
+    if inner not in sys.path:
+        sys.path.insert(1, inner)
+        logger.debug("Added GPT_SoVITS package to sys.path: %s", inner)
     # GPT-SoVITS reads config.py with relative model paths — must run from repo root
     os.chdir(sv_path)
     logger.debug("CWD set to GPT-SoVITS root: %s", sv_path)
+    # Force CPU — ROCm gfx1152 kernels aren't compiled in this torch+rocm build,
+    # so inference silently fails mid-generation on GPU.  CPU is slower but correct.
+    os.environ.setdefault("is_half", "False")
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 
 def _load_models(profile: VoiceProfile) -> None:
@@ -214,6 +224,19 @@ def _load_models(profile: VoiceProfile) -> None:
         return  # already loaded with the right weights
 
     _ensure_gptsovits_on_path(profile)
+
+    # torchaudio 2.9 defaults to TorchCodec which needs FFmpeg shared libs.
+    # Monkey-patch torchaudio.load to use soundfile so we bypass that dependency.
+    try:
+        import torchaudio, soundfile as sf
+        def _sf_load(path, *args, **kwargs):
+            data, sr = sf.read(str(path), dtype="float32", always_2d=False)
+            import torch
+            return torch.from_numpy(data).unsqueeze(0), sr
+        torchaudio.load = _sf_load
+        logger.debug("torchaudio.load patched to use soundfile")
+    except ImportError:
+        pass
 
     # Import inference helpers from the GPT-SoVITS repo
     try:
@@ -421,15 +444,24 @@ def export_to_wav(
 
     logger.info("Synthesising → %s", output_path.name)
 
+    # GPT-SoVITS expects i18n display names as language keys, not ISO codes.
+    _LANG_MAP = {
+        "en": "English", "zh": "Chinese", "ja": "Japanese",
+        "ko": "Korean",  "yue": "Cantonese",
+        "English": "English", "Chinese": "Chinese", "Japanese": "Japanese",
+    }
+    ref_lang  = _LANG_MAP.get(profile.ref_language,  profile.ref_language)
+    text_lang = _LANG_MAP.get(profile.text_language, profile.text_language)
+
     try:
         ref_wav = _ensure_wav(profile.ref_audio)
 
         gen = _cache.get_tts_wav(
             ref_wav_path      = str(ref_wav),
             prompt_text       = profile.ref_text,
-            prompt_language   = profile.ref_language,
+            prompt_language   = ref_lang,
             text              = text,
-            text_language     = profile.text_language,
+            text_language     = text_lang,
             top_k             = profile.top_k,
             top_p             = profile.top_p,
             temperature       = profile.temperature,
