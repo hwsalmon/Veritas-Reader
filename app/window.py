@@ -306,6 +306,8 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
+        self._build_menu_bar()
+
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
@@ -313,41 +315,37 @@ class MainWindow(QMainWindow):
         root.setSpacing(4)
 
         root.addWidget(self._build_top_bar())
+        root.addWidget(self._build_player_bar())
         root.addWidget(self._build_tts_pacing_bar())
         root.addWidget(self._build_filename_bar())
         root.addWidget(self._build_content_area(), stretch=1)
-        root.addWidget(self._build_player_bar())
-        root.addWidget(self._build_export_bar())
 
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("Ready")
         self._editor.text_changed.connect(self._mark_dirty)
         self._editor.grammar_check_requested.connect(self._on_grammar_check)
 
+    def _build_menu_bar(self) -> None:
+        mb = self.menuBar()
+
+        open_menu = mb.addMenu("Open")
+        open_menu.addAction("Open File…", self._on_open_file)
+        open_menu.addAction("Paste Text…", self._on_paste_text)
+        open_menu.addAction("Google Docs…", self._on_import_gdocs)
+
+        export_menu = mb.addMenu("Export")
+        export_menu.addAction("Commit Version", self._on_commit_version)
+        export_menu.addSeparator()
+        export_menu.addAction("Export .md…", lambda: self._on_export("md"))
+        export_menu.addAction("Export .docx…", lambda: self._on_export("docx"))
+        export_menu.addAction("Export .wav…", self._on_export_audio)
+        export_menu.addSeparator()
+        export_menu.addAction("Sync Google Docs…", self._on_sync_gdocs)
+
     def _build_top_bar(self) -> QWidget:
         bar = QWidget()
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(0, 0, 0, 0)
-
-        open_btn = QPushButton("Open File…")
-        open_btn.setToolTip("Open .md, .txt, or .docx file")
-        open_btn.clicked.connect(self._on_open_file)
-        layout.addWidget(open_btn)
-
-        paste_btn = QPushButton("Paste Text…")
-        paste_btn.setToolTip("Paste plain text")
-        paste_btn.clicked.connect(self._on_paste_text)
-        layout.addWidget(paste_btn)
-
-        gdocs_btn = QPushButton("Google Docs…")
-        gdocs_btn.setToolTip("Import from Google Docs")
-        gdocs_btn.clicked.connect(self._on_import_gdocs)
-        layout.addWidget(gdocs_btn)
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setFrameShadow(QFrame.Shadow.Sunken)
-        layout.addWidget(sep)
 
         self._ai_toggle_btn = QPushButton("✦ AI")
         self._ai_toggle_btn.setToolTip("Show/hide AI panel")
@@ -605,35 +603,6 @@ class MainWindow(QMainWindow):
         self._player = PlayerWidget()
         layout.addWidget(self._player)
         return container
-
-    def _build_export_bar(self) -> QWidget:
-        bar = QWidget()
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        commit_btn = QPushButton("Commit Version")
-        commit_btn.setToolTip("Save current content as a new version in the vault")
-        commit_btn.clicked.connect(self._on_commit_version)
-        layout.addWidget(commit_btn)
-
-        export_md = QPushButton("Export .md")
-        export_md.clicked.connect(lambda: self._on_export("md"))
-        layout.addWidget(export_md)
-
-        export_docx = QPushButton("Export .docx")
-        export_docx.clicked.connect(lambda: self._on_export("docx"))
-        layout.addWidget(export_docx)
-
-        export_wav = QPushButton("Export .wav")
-        export_wav.clicked.connect(self._on_export_audio)
-        layout.addWidget(export_wav)
-
-        sync_gdocs = QPushButton("Sync Google Docs")
-        sync_gdocs.clicked.connect(self._on_sync_gdocs)
-        layout.addWidget(sync_gdocs)
-
-        layout.addStretch()
-        return bar
 
     # ------------------------------------------------------------------
     # AI panel toggle
