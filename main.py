@@ -26,10 +26,11 @@ os.environ.setdefault(
     "QTWEBENGINE_CHROMIUM_FLAGS",
     # Allow media to play without a prior user click
     "--autoplay-policy=no-user-gesture-required"
-    # Disable the out-of-process audio service and its sandbox — fixes audio on Wayland/Linux
+    # Merge all disabled features into one flag (Chromium ignores duplicate --disable-features)
+    # - AudioServiceOutOfProcess/Sandbox: fix audio on Wayland/Linux
+    # - CrossOriginOpenerPolicy/EmbedderPolicy: stop CORS isolation blocking Google CDN media
     " --disable-features=AudioServiceOutOfProcess,AudioServiceSandbox"
-    # Disable cross-origin isolation enforcement that blocks media on Google CDN URLs
-    " --disable-features=CrossOriginOpenerPolicy,CrossOriginEmbedderPolicy"
+    ",CrossOriginOpenerPolicy,CrossOriginEmbedderPolicy"
     # Use the Chromium audio backend directly (avoids PipeWire handshake issues)
     " --use-fake-ui-for-media-stream"
 )

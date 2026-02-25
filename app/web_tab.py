@@ -32,6 +32,14 @@ def _get_profile() -> QWebEngineProfile:
         _profile.setPersistentCookiesPolicy(
             QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies
         )
+        # Spoof a standard Chrome UA so Google services (NotebookLM, YouTube etc.)
+        # serve WebM/Opus or MP4/AAC instead of refusing unsupported-browser codecs.
+        # The default QtWebEngine UA includes "QtWebEngine/X.X" which Google detects
+        # and responds to with "no supported sources".
+        _profile.setHttpUserAgent(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        )
         s = _profile.settings()
         # Allow JS to read/write clipboard (needed for image paste on Substack etc.)
         s.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanAccessClipboard, True)
