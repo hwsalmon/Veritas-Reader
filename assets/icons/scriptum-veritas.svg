@@ -33,7 +33,7 @@
     </filter>
     <!-- Only the top portion of the icon — for V arms crossing in front of S -->
     <clipPath id="vArmsClip">
-      <rect x="0" y="0" width="512" height="228"/>
+      <rect x="0" y="0" width="512" height="234"/>
     </clipPath>
   </defs>
 
@@ -43,9 +43,9 @@
         fill="none" stroke="#e8a820" stroke-width="3" opacity="0.5"/>
 
   <!-- LAYER 1: V — behind S -->
-  <text x="256" y="372"
+  <text x="256" y="468"
         font-family="Georgia, 'Times New Roman', serif"
-        font-size="252"
+        font-size="490"
         font-weight="bold"
         font-style="italic"
         text-anchor="middle"
@@ -54,9 +54,9 @@
         opacity="0.92">V</text>
 
   <!-- LAYER 2: S — in front of V's body (gold, slightly larger) -->
-  <text x="256" y="372"
+  <text x="256" y="468"
         font-family="Georgia, 'Times New Roman', serif"
-        font-size="296"
+        font-size="580"
         font-weight="bold"
         font-style="italic"
         text-anchor="middle"
@@ -65,9 +65,9 @@
 
   <!-- LAYER 3: V arms only — redrawn clipped to top region
        Makes V's splayed arms appear IN FRONT of S's upper curves -->
-  <text x="256" y="372"
+  <text x="256" y="468"
         font-family="Georgia, 'Times New Roman', serif"
-        font-size="252"
+        font-size="490"
         font-weight="bold"
         font-style="italic"
         text-anchor="middle"
