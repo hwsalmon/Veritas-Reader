@@ -13,19 +13,37 @@
     </linearGradient>
     <!-- Silver-white for V -->
     <linearGradient id="silver" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%"   stop-color="#ffffff"/>
-      <stop offset="100%" stop-color="#c8cfea"/>
+      <stop offset="0%"   stop-color="#e8eaf5"/>
+      <stop offset="100%" stop-color="#9aa0c8"/>
     </linearGradient>
-    <!-- Subtle inner glow filter -->
-    <filter id="glow" x="-10%" y="-10%" width="120%" height="120%">
-      <feGaussianBlur in="SourceAlpha" stdDeviation="6" result="blur"/>
-      <feFlood flood-color="#6b7fd4" flood-opacity="0.5" result="color"/>
+    <!-- Subtle glow for S -->
+    <filter id="glowGold" x="-15%" y="-15%" width="130%" height="130%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="7" result="blur"/>
+      <feFlood flood-color="#d4930a" flood-opacity="0.45" result="color"/>
       <feComposite in="color" in2="blur" operator="in" result="shadow"/>
       <feMerge>
         <feMergeNode in="shadow"/>
         <feMergeNode in="SourceGraphic"/>
       </feMerge>
     </filter>
+    <!-- Subtle glow for V -->
+    <filter id="glowSilver" x="-15%" y="-15%" width="130%" height="130%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="6" result="blur"/>
+      <feFlood flood-color="#4a5299" flood-opacity="0.4" result="color"/>
+      <feComposite in="color" in2="blur" operator="in" result="shadow"/>
+      <feMerge>
+        <feMergeNode in="shadow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <!--
+      Interlocking trick: draw V, then S on top, then re-draw only the
+      TOP portion of V (above y=210) in front — so V's arms cross OVER
+      the S's upper curves while S's body covers V's lower portion.
+    -->
+    <clipPath id="vArmsClip">
+      <rect x="0" y="0" width="512" height="210"/>
+    </clipPath>
   </defs>
 
   <!-- Rounded square background -->
@@ -33,45 +51,58 @@
 
   <!-- Thin gold border ring -->
   <rect x="10" y="10" width="492" height="492" rx="88" ry="88"
-        fill="none" stroke="#e8a820" stroke-width="3" opacity="0.55"/>
+        fill="none" stroke="#e8a820" stroke-width="3" opacity="0.5"/>
 
-  <!-- Decorative thin horizontal rule above letters -->
-  <line x1="100" y1="148" x2="412" y2="148"
+  <!-- Decorative rule above letters -->
+  <line x1="108" y1="145" x2="404" y2="145"
         stroke="#e8a820" stroke-width="1.5" opacity="0.4"/>
 
-  <!-- "S" — gold, slightly left of centre -->
-  <text x="118" y="330"
+  <!-- ═══ LAYER 1: V  — behind S ═══ -->
+  <text x="256" y="340"
         font-family="Georgia, 'Times New Roman', serif"
-        font-size="228"
+        font-size="264"
         font-weight="bold"
         font-style="italic"
-        fill="url(#gold)"
-        filter="url(#glow)"
-        letter-spacing="-4">S</text>
-
-  <!-- "V" — white/silver, overlaps S for depth -->
-  <text x="248" y="330"
-        font-family="Georgia, 'Times New Roman', serif"
-        font-size="228"
-        font-weight="bold"
-        font-style="italic"
+        text-anchor="middle"
         fill="url(#silver)"
-        filter="url(#glow)"
-        opacity="0.95"
-        letter-spacing="-4">V</text>
+        filter="url(#glowSilver)"
+        opacity="0.92">V</text>
 
-  <!-- Decorative thin horizontal rule below letters -->
-  <line x1="100" y1="360" x2="412" y2="360"
+  <!-- ═══ LAYER 2: S  — in front of V's body ═══ -->
+  <text x="256" y="325"
+        font-family="Georgia, 'Times New Roman', serif"
+        font-size="206"
+        font-weight="bold"
+        font-style="italic"
+        text-anchor="middle"
+        fill="url(#gold)"
+        filter="url(#glowGold)">S</text>
+
+  <!-- ═══ LAYER 3: V arms re-drawn, clipped to top region only ═══
+       This makes the top of V's arms appear IN FRONT of S's upper curves,
+       completing the interlocking effect.                               -->
+  <text x="256" y="340"
+        font-family="Georgia, 'Times New Roman', serif"
+        font-size="264"
+        font-weight="bold"
+        font-style="italic"
+        text-anchor="middle"
+        fill="url(#silver)"
+        clip-path="url(#vArmsClip)"
+        opacity="0.92">V</text>
+
+  <!-- Decorative rule below letters -->
+  <line x1="108" y1="358" x2="404" y2="358"
         stroke="#e8a820" stroke-width="1.5" opacity="0.4"/>
 
-  <!-- Small subtitle text -->
+  <!-- Subtitle -->
   <text x="256" y="415"
         font-family="Georgia, 'Times New Roman', serif"
-        font-size="36"
+        font-size="34"
         font-weight="normal"
         font-style="italic"
         text-anchor="middle"
         fill="#c8cfea"
         opacity="0.6"
-        letter-spacing="6">scriptum veritas</text>
+        letter-spacing="5">scriptum veritas</text>
 </svg>
