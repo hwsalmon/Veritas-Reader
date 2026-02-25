@@ -9,7 +9,7 @@ from markdownify import markdownify as html_to_md
 from platformdirs import user_data_dir
 from spellchecker import SpellChecker
 
-from PyQt6.QtCore import Qt, QEvent, pyqtSignal
+from PyQt6.QtCore import Qt, QEvent, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
     QFont,
@@ -41,6 +41,20 @@ from PyQt6.QtWidgets import (
 _APP_NAME = "VeritasReader"
 _USER_DICT_PATH = Path(user_data_dir(_APP_NAME)) / "user_dictionary.txt"
 _WORD_RE = re.compile(r"\b[A-Za-z]+(?:'[A-Za-z]+)*\b")
+
+# Patterns stripped before word counting so markdown syntax isn't counted
+_MD_STRIP = [
+    (re.compile(r"```.*?```", re.DOTALL), " "),   # fenced code blocks
+    (re.compile(r"`[^`\n]+`"), " "),               # inline code
+    (re.compile(r"^#{1,6}\s+", re.MULTILINE), ""), # heading markers
+    (re.compile(r"^[-*_]{3,}\s*$", re.MULTILINE), ""),  # horizontal rules
+    (re.compile(r"!?\[([^\]]*)\]\([^\)]*\)"), r"\1"),   # links/images → label only
+    (re.compile(r"\*{1,3}|_{1,3}|~~"), ""),        # bold/italic/strikethrough markers
+    (re.compile(r"^>\s?", re.MULTILINE), ""),      # blockquote markers
+    (re.compile(r"^\s*[-*+]\s+", re.MULTILINE), ""), # list bullets
+    (re.compile(r"^\s*\d+\.\s+", re.MULTILINE), ""), # numbered list markers
+]
+_WCOUNT_RE = re.compile(r"[A-Za-z\u00C0-\u024F]+(?:[''\-][A-Za-z]+)*")
 
 logger = logging.getLogger(__name__)
 
@@ -262,6 +276,11 @@ class EditorWidget(QWidget):
         grammar_btn.clicked.connect(self._on_check_grammar)
         tl.addWidget(grammar_btn)
 
+        find_btn = QPushButton("Find")
+        find_btn.setToolTip("Find / Replace  (Ctrl+F / Ctrl+H)")
+        find_btn.clicked.connect(lambda: self._show_find(replace=False))
+        tl.addWidget(find_btn)
+
         tl.addStretch()
 
         # Mode toggle
@@ -315,7 +334,25 @@ class EditorWidget(QWidget):
 
         self._stack.addWidget(self._markup_editor)   # index 0
         self._stack.addWidget(self._rich_editor)     # index 1
-        layout.addWidget(self._stack)
+        layout.addWidget(self._stack, stretch=1)
+
+        # --- Word-count status strip ---
+        wc_bar = QWidget()
+        wcl = QHBoxLayout(wc_bar)
+        wcl.setContentsMargins(6, 1, 6, 1)
+        self._word_count_label = QLabel("0 words")
+        self._word_count_label.setStyleSheet("color: gray; font-size: 10px;")
+        wcl.addWidget(self._word_count_label)
+        wcl.addStretch()
+        layout.addWidget(wc_bar)
+
+        # Debounce timer so large pastes don't stall the UI
+        self._wc_timer = QTimer()
+        self._wc_timer.setSingleShot(True)
+        self._wc_timer.setInterval(400)
+        self._wc_timer.timeout.connect(self._refresh_word_count)
+        self._markup_editor.textChanged.connect(self._wc_timer.start)
+        self._rich_editor.textChanged.connect(self._wc_timer.start)
 
     # ------------------------------------------------------------------
     # Mode toggle
@@ -650,6 +687,21 @@ class EditorWidget(QWidget):
             cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
             cursor.insertHtml("<br/><hr/><br/>")
             self._rich_editor.setTextCursor(cursor)
+
+    # ------------------------------------------------------------------
+    # Word count
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _count_words(text: str) -> int:
+        """Count words in *text* after stripping Markdown syntax."""
+        for pattern, repl in _MD_STRIP:
+            text = pattern.sub(repl, text)
+        return len(_WCOUNT_RE.findall(text))
+
+    def _refresh_word_count(self) -> None:
+        count = self._count_words(self.get_text())
+        self._word_count_label.setText(f"{count:,} words")
 
     # ------------------------------------------------------------------
     # Find / Replace
