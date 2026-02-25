@@ -21,6 +21,13 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+# Must be set before QApplication is created — Chromium reads it at process start.
+# Removes the "user gesture required" block on media autoplay (helps NotebookLM audio).
+os.environ.setdefault(
+    "QTWEBENGINE_CHROMIUM_FLAGS",
+    "--autoplay-policy=no-user-gesture-required",
+)
+
 
 def main() -> int:
     app = QApplication(sys.argv)

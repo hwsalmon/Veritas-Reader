@@ -197,6 +197,15 @@ class AppSettings:
     def last_autosave_path(self, value: str) -> None:
         self._qs.setValue("files/last_autosave_path", value)
 
+    @property
+    def last_vault_path(self) -> str:
+        """str(vault.root) of the most recently active project vault."""
+        return self._qs.value("files/last_vault_path", "")
+
+    @last_vault_path.setter
+    def last_vault_path(self, value: str) -> None:
+        self._qs.setValue("files/last_vault_path", value)
+
     # ------------------------------------------------------------------
     # Window geometry
     # ------------------------------------------------------------------

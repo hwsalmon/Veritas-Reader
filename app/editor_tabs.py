@@ -296,6 +296,23 @@ class EditorTabWidget(QWidget):
         self._add_editor_tab(text, title)
         return text
 
+    # ------------------------------------------------------------------
+    # Low-level accessors (used by window.py session restore)
+    # ------------------------------------------------------------------
+
+    def tab_count(self) -> int:
+        return self._tabs.count()
+
+    def tab_widget_at(self, index: int) -> QWidget:
+        return self._tabs.widget(index)
+
+    def active_tab_index(self) -> int:
+        return self._tabs.currentIndex()
+
+    def set_active_tab(self, index: int) -> None:
+        if 0 <= index < self._tabs.count():
+            self._tabs.setCurrentIndex(index)
+
     def open_url_tab(self, url: str, title: str) -> None:
         """Open an embedded browser tab at *url*."""
         from app.web_tab import BrowserTab

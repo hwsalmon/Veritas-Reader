@@ -40,20 +40,28 @@ class Vault:
     # ------------------------------------------------------------------
 
     def next_version_path(self, suffix: str = ".md") -> Path:
-        """Return the next unused stem-N.ext path inside versions/."""
-        n = 1
+        """Return a timestamped v_YYYYMMDD_HHMMSS path inside versions/.
+
+        Falls back to appending _2, _3 … if the same second fires twice.
+        """
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        candidate = self.versions_dir / f"v_{ts}{suffix}"
+        if not candidate.exists():
+            return candidate
+        n = 2
         while True:
-            candidate = self.versions_dir / f"{self.stem}-{n}{suffix}"
+            candidate = self.versions_dir / f"v_{ts}_{n}{suffix}"
             if not candidate.exists():
                 return candidate
             n += 1
 
     def list_versions(self) -> list[Path]:
-        """Return version files sorted oldest-first."""
+        """Return version files sorted oldest-first (both legacy stem-N and new v_ naming)."""
         paths: list[Path] = []
         for ext in (".md", ".txt", ".docx"):
-            paths.extend(self.versions_dir.glob(f"{self.stem}-*{ext}"))
-        return sorted(paths)
+            paths.extend(self.versions_dir.glob(f"{self.stem}-*{ext}"))  # legacy
+            paths.extend(self.versions_dir.glob(f"v_*{ext}"))            # timestamped
+        return sorted(set(paths))
 
     # ------------------------------------------------------------------
     # Audio
@@ -103,3 +111,35 @@ class Vault:
 
     def default_kb_path(self) -> Path:
         return self.kb_dir / f"{self.stem}.vkb"
+
+    # ------------------------------------------------------------------
+    # Session persistence
+    # ------------------------------------------------------------------
+
+    @property
+    def session_path(self) -> Path:
+        """Path to the workspace session file for this project."""
+        return self.root / "session.json"
+
+    def save_session(self, data: dict) -> None:
+        """Persist workspace state to session.json using atomic write."""
+        tmp = self.session_path.with_suffix(".tmp")
+        try:
+            tmp.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            tmp.replace(self.session_path)
+            logger.debug("Session saved: %s", self.session_path)
+        except Exception as exc:
+            logger.warning("Failed to save session: %s", exc)
+            tmp.unlink(missing_ok=True)
+
+    def load_session(self) -> dict | None:
+        """Load session.json, returning None if absent or corrupt."""
+        if not self.session_path.exists():
+            return None
+        try:
+            return json.loads(self.session_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("Could not load session.json: %s", exc)
+            return None

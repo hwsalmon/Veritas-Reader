@@ -4,6 +4,7 @@ import logging
 import tempfile
 import shutil
 import threading
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -339,7 +340,7 @@ class MainWindow(QMainWindow):
         self.resize(1200, 780)
         self._build_ui()
         self._restore_geometry()
-        self._reopen_last_file()
+        self._restore_last_session()
 
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setInterval(60_000)  # every 60 seconds
@@ -391,6 +392,9 @@ class MainWindow(QMainWindow):
         file_menu.addAction("Open from Imports…", self._on_open_from_imports)
         file_menu.addSeparator()
         file_menu.addAction("Choose Vault…", self._on_choose_vault)
+        file_menu.addSeparator()
+        file_menu.addAction("Open Project…", self._on_open_project)
+        file_menu.addAction("Close Project",  self._on_close_project)
         file_menu.addSeparator()
         file_menu.addAction("Close All Tabs", self._on_close_all_tabs)
         file_menu.addSeparator()
@@ -971,6 +975,7 @@ class MainWindow(QMainWindow):
         """Create (or re-open) the vault for the document at *path*."""
         self._vault = Vault(self._settings.vault_root, path.stem)
         self._vault.init()
+        self._settings.last_vault_path = str(self._vault.root)
         self._refresh_history_tab()
         logger.info("Vault: %s", self._vault.root)
 
@@ -1047,6 +1052,7 @@ class MainWindow(QMainWindow):
                 f"Auto-saved: {self._autosave_path.name}", 3000
             )
             logger.debug("Auto-saved to %s", self._autosave_path)
+            self._save_session()
         except Exception as exc:
             logger.warning("Auto-save failed: %s", exc)
 
@@ -1766,6 +1772,329 @@ class MainWindow(QMainWindow):
         self._pool.start(worker)
 
     # ------------------------------------------------------------------
+    # Session — collect / save / restore
+    # ------------------------------------------------------------------
+
+    def _collect_session(self) -> dict:
+        """Snapshot complete workspace state into a JSON-serialisable dict."""
+        from app.web_tab import BrowserTab
+
+        # Editor tabs
+        tabs_data = []
+        for i in range(self._editor.tab_count()):
+            w = self._editor.tab_widget_at(i)
+            title = self._editor._tabs.tabText(i)
+            if isinstance(w, BrowserTab):
+                tabs_data.append({
+                    "type": "browser",
+                    "title": title,
+                    "content": "",
+                    "url": w.current_url(),
+                    "is_primary": (i == 0),
+                })
+            else:
+                tabs_data.append({
+                    "type": "editor",
+                    "title": title,
+                    "content": w.get_text() if hasattr(w, "get_text") else "",
+                    "url": "",
+                    "is_primary": (i == 0),
+                })
+
+        # AI browser tabs (indices >= 3)
+        ai_browser_tabs = []
+        for i in range(3, self._ai_tabs.count()):
+            w = self._ai_tabs.widget(i)
+            ai_browser_tabs.append({
+                "title": self._ai_tabs.tabText(i),
+                "url": w.current_url() if isinstance(w, BrowserTab) else "",
+            })
+
+        return {
+            "schema_version": 1,
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+            "project": {
+                "name": self._file_name_input.get_name(),
+                "vault_path": str(self._vault.root) if self._vault else "",
+                "file_path": str(self._current_file_path) if self._current_file_path else "",
+            },
+            "editor": {
+                "file_name": self._file_name_input.get_name(),
+                "active_tab": self._editor.active_tab_index(),
+                "tabs": tabs_data,
+            },
+            "ai": {
+                "panel_visible": self._ai_panel.isVisible(),
+                "active_tab": self._ai_tabs.currentIndex(),
+                "tts_bar_visible": self._tts_bar.isVisible(),
+                "splitter_sizes": self._splitter.sizes(),
+                "browser_tabs": ai_browser_tabs,
+                "generate": {
+                    "model": self._model_selector.current_model() or "",
+                    "prompt": self._prompt_input.toPlainText(),
+                    "output": self._ai_output.toPlainText(),
+                    "messages": list(self._generate_chat_messages),
+                },
+                "kb": {
+                    "embed_model": self._embed_model_input.text(),
+                    "kb_path": "",
+                    "chat_text": self._kb_chat.toPlainText(),
+                    "chat_messages": list(self._kb_chat_messages),
+                },
+            },
+        }
+
+    def _save_session(self) -> None:
+        """Write session.json to the active vault; no-op if no vault."""
+        if self._vault is None:
+            return
+        try:
+            self._vault.save_session(self._collect_session())
+        except Exception as exc:
+            logger.warning("Session save failed: %s", exc)
+
+    def _restore_session(self, data: dict) -> None:
+        """Apply a session dict to the workspace.
+
+        Disconnects text_changed → _mark_dirty for the duration so restoring
+        content does not spuriously mark the document dirty.
+        """
+        try:
+            self._editor.text_changed.disconnect(self._mark_dirty)
+        except TypeError:
+            pass
+
+        try:
+            self._restore_editor_tabs(data.get("editor", {}))
+            self._restore_ai_state(data.get("ai", {}))
+
+            proj = data.get("project", {})
+            file_name = data.get("editor", {}).get("file_name", "") or proj.get("name", "")
+            if file_name:
+                self._file_name_input.set_name(file_name)
+
+            file_path_str = proj.get("file_path", "")
+            if file_path_str:
+                self._current_file_path = Path(file_path_str)
+                self._settings.last_file_path = file_path_str
+                self._autosave_path = self._compute_autosave_path(self._current_file_path)
+
+            self._dirty = False
+            self.statusBar().showMessage(
+                f"Session restored: {proj.get('name', 'project')}"
+            )
+        except Exception as exc:
+            logger.warning("Session restore failed: %s", exc)
+            self.statusBar().showMessage("Session restore failed — starting fresh.")
+        finally:
+            self._editor.text_changed.connect(self._mark_dirty)
+
+    def _restore_editor_tabs(self, editor_data: dict) -> None:
+        """Recreate editor tabs from session data without prompting for saves."""
+        from app.web_tab import BrowserTab
+
+        tabs = editor_data.get("tabs", [])
+        if not tabs:
+            return
+
+        # Restore primary tab (index 0, always type="editor")
+        primary = next((t for t in tabs if t.get("is_primary")), tabs[0])
+        if primary.get("type") == "editor":
+            primary_widget = self._editor.tab_widget_at(0)
+            if hasattr(primary_widget, "set_text"):
+                primary_widget.set_text(primary.get("content", ""))
+            self._editor.set_main_tab_title(primary.get("title", "Document"))
+
+        # Remove any extra tabs silently (no unsaved-content prompts during restore)
+        while self._editor.tab_count() > 1:
+            self._editor._tabs.removeTab(self._editor.tab_count() - 1)
+
+        # Recreate tabs 1+
+        for tab_data in tabs[1:]:
+            if tab_data.get("type") == "browser":
+                url = tab_data.get("url", "about:blank")
+                self._editor.open_url_tab(url, tab_data.get("title", url))
+            else:
+                self._editor.open_in_new_tab(
+                    tab_data.get("content", ""),
+                    tab_data.get("title", "Draft"),
+                )
+
+        active = editor_data.get("active_tab", 0)
+        self._editor.set_active_tab(active)
+
+    def _restore_ai_state(self, ai_data: dict) -> None:
+        """Restore AI panel generate/KB state, browser tabs, and UI visibility."""
+        from app.web_tab import BrowserTab
+
+        if not ai_data:
+            return
+
+        # Generate tab
+        gen = ai_data.get("generate", {})
+        if gen.get("prompt"):
+            self._prompt_input.setPlainText(gen["prompt"])
+        if gen.get("output"):
+            self._ai_output.setPlainText(gen["output"])
+        self._generate_chat_messages = list(gen.get("messages", []))
+        has_chat = len(self._generate_chat_messages) >= 2
+        self._followup_input.setEnabled(has_chat)
+        self._followup_btn.setEnabled(has_chat)
+
+        # Model — defer because ModelSelectorCombo loads models asynchronously
+        model = gen.get("model", "")
+        if model:
+            self._try_set_model(model)
+
+        # KB Chat tab
+        kb = ai_data.get("kb", {})
+        if kb.get("embed_model"):
+            self._embed_model_input.setText(kb["embed_model"])
+        if kb.get("chat_text"):
+            self._kb_chat.setPlainText(kb["chat_text"])
+        self._kb_chat_messages = list(kb.get("chat_messages", []))
+
+        # AI browser tabs (> the 3 permanent ones)
+        for tab_data in ai_data.get("browser_tabs", []):
+            url = tab_data.get("url", "about:blank")
+            title = tab_data.get("title", url)
+            if url:
+                browser = BrowserTab(url)
+                self._ai_tabs.addTab(browser, title)
+
+        # Active AI sub-tab
+        active_ai_tab = ai_data.get("active_tab", 0)
+        if 0 <= active_ai_tab < self._ai_tabs.count():
+            self._ai_tabs.setCurrentIndex(active_ai_tab)
+
+        # TTS bar
+        if ai_data.get("tts_bar_visible"):
+            self._tts_bar.show()
+            self._tts_toggle_btn.setText("TTS ✕")
+        else:
+            self._tts_bar.hide()
+            self._tts_toggle_btn.setText("TTS")
+
+        # AI panel + splitter (defer setSizes so Qt layout settles first)
+        panel_visible = ai_data.get("panel_visible", False)
+        splitter_sizes = ai_data.get("splitter_sizes")
+        if panel_visible:
+            self._ai_panel.show()
+            self._ai_toggle_btn.setText("✦ AI ✕")
+            if splitter_sizes and len(splitter_sizes) == 2:
+                sizes = splitter_sizes
+                QTimer.singleShot(0, lambda: self._splitter.setSizes(sizes))
+        else:
+            self._ai_panel.hide()
+            self._ai_toggle_btn.setText("✦ AI")
+
+    def _try_set_model(self, model: str, attempt: int = 0) -> None:
+        """Select *model* in the combo, retrying while models are still loading."""
+        self._model_selector.set_preferred(model)
+        # If the combo still shows "Loading…", poll up to 10× at 300 ms intervals
+        if attempt < 10 and self._model_selector.current_model() is None:
+            QTimer.singleShot(300, lambda: self._try_set_model(model, attempt + 1))
+
+    # ------------------------------------------------------------------
+    # Session — startup restore and project management
+    # ------------------------------------------------------------------
+
+    def _restore_last_session(self) -> None:
+        """On startup: restore the last session.json, falling back to legacy file reopen."""
+        vault_path_str = self._settings.last_vault_path
+        if vault_path_str:
+            vault_root_path = Path(vault_path_str)
+            if vault_root_path.is_dir():
+                vault = Vault(vault_root_path.parent, vault_root_path.name)
+                data = vault.load_session()
+                if data and data.get("schema_version") == 1:
+                    self._vault = vault
+                    self._vault.init()
+                    self._restore_session(data)
+                    logger.info("Full session restored from %s", vault_root_path)
+                    return
+        # Fallback: legacy file-only restore
+        self._reopen_last_file()
+
+    def _on_open_project(self) -> None:
+        """Show project picker and restore the selected project's session."""
+        from app.dialogs.project_picker import ProjectPickerDialog
+        dlg = ProjectPickerDialog(self._settings.vault_root, parent=self)
+        if not dlg.exec():
+            return
+        selected = dlg.get_selected_vault_root()
+        if not selected:
+            return
+
+        # Save current session before switching
+        self._save_session()
+
+        vault = Vault(selected.parent, selected.name)
+        data = vault.load_session()
+        if data is None:
+            QMessageBox.warning(
+                self, "No Session",
+                f"Project '{selected.name}' has no saved session.",
+            )
+            return
+
+        self._vault = vault
+        self._vault.init()
+        self._settings.last_vault_path = str(selected)
+        self._refresh_history_tab()
+        self._restore_session(data)
+
+    def _on_close_project(self) -> None:
+        """Save session and reset workspace to a clean state."""
+        if self._vault is None and not self._dirty:
+            self.statusBar().showMessage("No project open.")
+            return
+
+        self._autosave()
+        self._save_session()
+
+        # Remove extra editor tabs silently
+        while self._editor.tab_count() > 1:
+            self._editor._tabs.removeTab(self._editor.tab_count() - 1)
+
+        # Remove AI browser tabs
+        for i in range(self._ai_tabs.count() - 1, 2, -1):
+            self._ai_tabs.removeTab(i)
+
+        self._editor.set_text("")
+        self._editor.set_main_tab_title("Document")
+        self._file_name_input.set_name("")
+        self._prompt_input.clear()
+        self._ai_output.clear()
+        self._kb_chat.clear()
+        self._kb_status.setText("No knowledge base loaded.")
+        self._kb_save_btn.setEnabled(False)
+        self._kb_ask_btn.setEnabled(False)
+        self._followup_input.setEnabled(False)
+        self._followup_btn.setEnabled(False)
+        self._history_list.clear()
+
+        self._ai_panel.hide()
+        self._ai_toggle_btn.setText("✦ AI")
+        self._tts_bar.hide()
+        self._tts_toggle_btn.setText("TTS")
+
+        self._generate_chat_messages = []
+        self._kb_chat_messages = []
+        self._kb_response_buffer = ""
+        self._stream_buffer = ""
+        self._vault = None
+        self._kb = None
+        self._current_file_path = None
+        self._autosave_path = None
+        self._dirty = False
+        self._settings.last_vault_path = ""
+        self._settings.last_file_path = ""
+        self._settings.last_autosave_path = ""
+
+        self.statusBar().showMessage("Project closed.")
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
@@ -1775,7 +2104,8 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(geom)
 
     def closeEvent(self, event) -> None:
-        self._autosave()  # flush any unsaved changes on exit
+        self._autosave()       # flush document content
+        self._save_session()   # flush full workspace state
         self._settings.window_geometry = bytes(self.saveGeometry())
         self._settings.sync()
         super().closeEvent(event)

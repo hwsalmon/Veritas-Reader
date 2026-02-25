@@ -1,5 +1,6 @@
 """Persistent embedded browser widget for Veritas Editor."""
 
+import subprocess
 from pathlib import Path
 
 from platformdirs import user_data_dir
@@ -60,11 +61,15 @@ class BrowserTab(QWidget):
         self._fwd_btn.setFixedSize(24, 24)
         self._reload_btn = QPushButton("↺")
         self._reload_btn.setFixedSize(24, 24)
+        self._ext_btn = QPushButton("⧉")
+        self._ext_btn.setFixedSize(24, 24)
+        self._ext_btn.setToolTip("Open current URL in system browser")
         self._address = QLineEdit(url)
         self._address.setFixedHeight(24)
         nl.addWidget(self._back_btn)
         nl.addWidget(self._fwd_btn)
         nl.addWidget(self._reload_btn)
+        nl.addWidget(self._ext_btn)
         nl.addWidget(self._address)
         layout.addWidget(nav)
 
@@ -81,10 +86,21 @@ class BrowserTab(QWidget):
         )
         self._view.urlChanged.connect(lambda u: self._address.setText(u.toString()))
 
+        self._ext_btn.clicked.connect(self._on_open_in_browser)
+
         # Auto-grant feature permissions (clipboard, media, notifications)
         page.featurePermissionRequested.connect(self._on_permission_requested)
 
         self._view.setUrl(QUrl(url))
+
+    def current_url(self) -> str:
+        """Return the current page URL as a string."""
+        return self._view.url().toString()
+
+    def _on_open_in_browser(self) -> None:
+        url = self.current_url()
+        if url and url not in ("about:blank", ""):
+            subprocess.Popen(["xdg-open", url])
 
     def _on_permission_requested(self, url, feature) -> None:
         self._view.page().setFeaturePermission(

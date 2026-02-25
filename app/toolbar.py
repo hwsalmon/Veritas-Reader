@@ -122,6 +122,13 @@ class ModelSelectorCombo(QWidget):
             return None
         return text
 
+    def set_preferred(self, model: str) -> None:
+        """Update preferred model and select it immediately if already loaded."""
+        self._preferred = model
+        idx = self._combo.findText(model, Qt.MatchFlag.MatchContains)
+        if idx >= 0:
+            self._combo.setCurrentIndex(idx)
+
 
 # ---------------------------------------------------------------------------
 # Voice Selector
