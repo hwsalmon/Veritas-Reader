@@ -806,8 +806,8 @@ class EditorWidget(QWidget):
         self._find_bar.hide()
         self._active_editor().setFocus()
 
-    def _find_flags(self) -> QTextDocument.FindFlags:
-        flags = QTextDocument.FindFlags()
+    def _find_flags(self) -> QTextDocument.FindFlag:
+        flags = QTextDocument.FindFlag(0)
         if self._case_cb.isChecked():
             flags |= QTextDocument.FindFlag.FindCaseSensitively
         if self._word_cb.isChecked():
