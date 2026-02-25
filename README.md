@@ -8,43 +8,55 @@ Scriptum Veritas combines a rich markdown editor, local LLM text generation via 
 
 ## Features
 
-### File Management
-- **New File** (`Ctrl+N`) — clear the editor with a Save / Discard / Cancel prompt when there are unsaved changes
-- **Import Documents** — multi-select `.md`, `.txt`, or `.docx` files; copies them into `VeritasVault/imports/` with automatic collision avoidance
-- **Open from Imports** — browse the imports folder in a dialog, double-click to load; includes a "Reveal Folder" button
-- **Close All Tabs** — closes every scratch tab (prompts on unsaved content), leaving the primary document tab intact
+### Project & File Management
+- **New Project** (`Ctrl+N`) — create a named project; sets up a Vault directory and autosave path
+- **Open Project** — open an existing Vault project and fully restore its last session
+- **Close Project** — close the current project (prompts on unsaved content)
+- **Open File** — load any `.md`, `.txt`, or `.docx` file into the current project
+- **Paste Text** — paste plain text directly into the editor
+- **Import Documents** — multi-select `.md`, `.txt`, or `.docx` files; copies to `VeritasVault/imports/` with automatic collision avoidance
+- **Open from Imports** — browse the imports folder, double-click to load; includes a "Reveal Folder" button
+- **Close All Tabs** — close every scratch tab (prompts on unsaved content), leaving the primary document tab intact
 - **Exit** (`Ctrl+Q`) — autosaves then closes cleanly
 
 ### Editor
-- Multi-tab editor with clone, right-click close, and unsaved-content warnings
-- Markup ↔ Formatted toggle — switch between raw markdown and rendered rich text
-- Style toolbar: headings (H1–H3), bold, italic, strikethrough, blockquote, bullet list, indent/outdent
-- Find & Replace with match-case, whole-word, and replace-all
-- US-English spell checking with custom user dictionary and inline suggestions
-- AI-powered grammar check (feeds editor text directly into the Generate panel)
-- Versioned autosave every 60 seconds into the active Vault
+- **Multi-tab editor** with versioned tab labels (`Project — V1`, `— V2` …); double-click any tab to rename it
+- **Markup ↔ Formatted toggle** — switch between raw markdown and rendered rich text at any time
+- **Style toolbar** — headings (H1–H3), bold, italic, strikethrough, blockquote, bullet list, indent/outdent
+- **Find & Replace** (`Ctrl+F` / `Ctrl+H`) with match-case, whole-word, and replace-all; toolbar Find button for quick access
+- **Word count** — live markdown-aware word count displayed at the bottom-left of each editor tab
+- **Text-size zoom** — `Ctrl++` / `Ctrl+-` scales all editor and panel text globally; preference is persisted
+- **US-English spell checking** with custom user dictionary and inline suggestions
+- **AI-powered grammar check** — feeds editor text directly into the Generate panel
+- **Versioned autosave** — writes a new numbered snapshot to the Vault every 60 seconds and after every tab clone
 
 ### AI Generation
-- Chat with any locally-running Ollama model — streamed token-by-token
-- Follow-up conversation mode — continue a generation without re-entering context
-- Knowledge Base (RAG) — embed your document with `nomic-embed-text`, then ask questions over it using cosine-similarity retrieval
-- AI session history — every generate/KB-chat session saved to the Vault and reloadable
-- One-click "Open in New Tab" to move AI output into a fresh editor tab
+- Chat with any locally-running **Ollama** model — streamed token-by-token
+- **Follow-up conversation mode** — continue a generation without re-entering context
+- **Knowledge Base (RAG)** — embed any editor tab with `nomic-embed-text`, ask questions over it using cosine-similarity retrieval; select the source tab from a dropdown; KB auto-saved to the Vault and auto-loaded on next session
+- **AI session history** — every generate / KB-chat session saved to the Vault and reloadable
+- **"Open in New Tab"** — move AI output into a fresh versioned editor tab
+- Embedded **NotebookLM**, **ChatGPT**, **Gemini**, and **Claude AI** browser tabs in the AI panel
 
 ### Text-to-Speech
 - Primary engine: **Kokoro-82M ONNX** — high quality, low latency
-- Per-segment pacing: speed, sentence pause, m-dash pause, paragraph pause
+- Per-segment pacing controls: speed, sentence pause, m-dash pause, paragraph pause
 - 5-stage audio pipeline: silence removal → EQ → soft-knee compression → loudness normalisation → 44.1 kHz upsample
 - Export as `.wav` (lossless) or `.mp3` (192k)
+- **GPT-SoVITS offline renderer** — batch-render paragraphs with a custom voice profile
 
 ### Embedded Browsers
 - Persistent browser tabs backed by a single `QWebEngineProfile` (cookies survive restarts)
 - Quick-launch buttons for **Substack**, **NotebookLM**, **ChatGPT**, **Gemini**, and **Claude AI** — log in once, stay logged in
 
 ### Vault System
-- Every document lives in `~/Documents/VeritasVault/<stem>/` with subfolders for `versions/`, `ai_history/`, `audio/`, and `kb/`
-- "Commit Version" and Clone Tab both write a new numbered snapshot
-- Choose Vault root from the File menu
+- Every document lives in `~/Documents/VeritasVault/<project>/` with subfolders: `versions/`, `ai_history/`, `audio/`, `kb/`
+- **Commit Version** and **Clone Tab** both write a new numbered snapshot
+- Session state (all open tabs + content, AI history, KB path, window geometry) is written to `session.json` and fully restored on next launch
+- Session checkpointed immediately after each clone; 60-second background autosave
+
+### Appearance
+- **Dark / Light mode** toggle in the View menu, persisted across sessions
 
 ---
 
@@ -115,7 +127,7 @@ scriptum-veritas/
 ├── app/
 │   ├── window.py              # MainWindow
 │   ├── editor.py              # Markup/formatted editor widget
-│   ├── editor_tabs.py         # Multi-tab container with overlay buttons
+│   ├── editor_tabs.py         # Multi-tab container with versioned labels
 │   ├── web_tab.py             # Persistent embedded browser (QWebEngineView)
 │   ├── player.py              # Audio player (QMediaPlayer)
 │   ├── toolbar.py             # ModelSelector, VoiceSelector, PacingControls
@@ -123,7 +135,8 @@ scriptum-veritas/
 │   └── dialogs/
 │       ├── paste_dialog.py
 │       ├── gdocs_dialog.py
-│       └── imports_dialog.py  # Imports folder browser
+│       ├── imports_dialog.py  # Imports folder browser
+│       └── project_picker.py  # Open Project dialog
 ├── core/
 │   ├── file_handler.py        # .md / .txt / .docx read & write
 │   ├── ollama_client.py       # Ollama HTTP client (generate, chat, embed)
@@ -132,6 +145,7 @@ scriptum-veritas/
 │   ├── knowledge_base.py      # Chunking, embedding, cosine retrieval
 │   ├── text_preprocessor.py   # Markdown stripping + prosodic expansion
 │   ├── vault.py               # Versioned document vault
+│   ├── renderer.py            # GPT-SoVITS offline batch renderer
 │   └── gdocs.py               # Google Docs OAuth integration
 ├── config/
 │   └── settings.py            # QSettings-backed app preferences
