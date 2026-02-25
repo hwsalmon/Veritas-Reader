@@ -1,11 +1,14 @@
 """Multi-tab editor container — wraps multiple EditorWidget instances."""
 
 import logging
+import re
 
 from PyQt6.QtCore import QPoint, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
+    QInputDialog,
+    QLineEdit,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -15,16 +18,20 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+# Matches the version suffix appended to tab titles (e.g. " — V3")
+_V_RE = re.compile(r" — V(\d+)$")
+
 from app.editor import EditorWidget
 
 logger = logging.getLogger(__name__)
 
 
 class _TabBar(QTabBar):
-    """QTabBar subclass — emits layout_changed and context_menu_requested."""
+    """QTabBar subclass — emits layout_changed, context_menu_requested, rename_requested."""
 
     layout_changed = pyqtSignal()
     context_menu_requested = pyqtSignal(int, QPoint)   # (tab_index, global_pos)
+    rename_requested = pyqtSignal(int)                  # (tab_index)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -38,6 +45,13 @@ class _TabBar(QTabBar):
         idx = self.tabAt(event.pos())
         if idx >= 0:
             self.context_menu_requested.emit(idx, self.mapToGlobal(event.pos()))
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        idx = self.tabAt(event.pos())
+        if idx >= 0:
+            self.rename_requested.emit(idx)
+        else:
+            super().mouseDoubleClickEvent(event)
 
 
 class EditorTabWidget(QWidget):
@@ -57,10 +71,13 @@ class EditorTabWidget(QWidget):
     text_changed = pyqtSignal()
     grammar_check_requested = pyqtSignal(str)
     clone_requested = pyqtSignal()
+    tabs_changed = pyqtSignal()   # emitted when tabs are added / removed / renamed
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._last_editor_idx: int = 0
+        self._base_title: str = ""          # project name without version suffix
+        self._widget_paths: dict = {}       # EditorWidget → Path (vault version file)
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -86,7 +103,7 @@ class EditorTabWidget(QWidget):
         # -------------------------------------------------------------------
         specs = [
             ("+",  "New scratch tab",
-             lambda: self.open_in_new_tab("", "Draft")),
+             lambda: self.open_in_new_tab("")),
             ("⊞",  "Clone tab — copies content to new tab and saves a vault version",
              self.clone_requested),
             ("S",  "Open Substack dashboard",
@@ -104,10 +121,11 @@ class EditorTabWidget(QWidget):
         # Reposition whenever tab layout changes or current tab switches
         self._tab_bar.layout_changed.connect(self._reposition_btns)
         self._tab_bar.context_menu_requested.connect(self._on_tab_context_menu)
+        self._tab_bar.rename_requested.connect(self._on_rename_tab)
         self._tabs.currentChanged.connect(self._on_current_tab_changed)
 
         # Primary document tab (index 0) — always present, not closable
-        self._add_editor_tab("", "Document")
+        self._add_editor_tab("", "V1")
 
         # Ctrl+Shift+C — copy active tab contents to clipboard
         copy_shortcut = QShortcut(QKeySequence("Ctrl+Shift+C"), self)
@@ -127,6 +145,7 @@ class EditorTabWidget(QWidget):
         copy_action = menu.addAction("Copy Tab Contents")
         copy_action.setShortcut(QKeySequence("Ctrl+Shift+C"))
         clone_action = menu.addAction("Clone Tab")
+        rename_action = menu.addAction("Rename Tab…")
         menu.addSeparator()
         close_action = menu.addAction("Close Tab")
         close_action.setEnabled(idx != 0)   # primary tab is never closable
@@ -137,6 +156,8 @@ class EditorTabWidget(QWidget):
             self._copy_tab_by_index(idx)
         elif action == clone_action:
             self._clone_tab_by_index(idx)
+        elif action == rename_action:
+            self._on_rename_tab(idx)
         elif action == close_action:
             self._close_tab_with_warning(idx)
 
@@ -161,6 +182,7 @@ class EditorTabWidget(QWidget):
         """Close all tabs except index 0, prompting for unsaved content."""
         for idx in range(self._tabs.count() - 1, 0, -1):
             self._close_tab_with_warning(idx)
+        self.tabs_changed.emit()
 
     def _copy_tab_by_index(self, idx: int) -> None:
         widget = self._tabs.widget(idx)
@@ -176,8 +198,7 @@ class EditorTabWidget(QWidget):
     def _clone_tab_by_index(self, idx: int) -> None:
         widget = self._tabs.widget(idx)
         text = widget.get_text() if isinstance(widget, EditorWidget) else ""
-        title = self._tabs.tabText(idx) + " (copy)"
-        self._add_editor_tab(text, title)
+        self._add_editor_tab(text, self._versioned_title())
 
     # ------------------------------------------------------------------
     # Overlay button positioning
@@ -225,12 +246,14 @@ class EditorTabWidget(QWidget):
         editor.grammar_check_requested.connect(self.grammar_check_requested)
         idx = self._tabs.addTab(editor, title)
         self._tabs.setCurrentIndex(idx)
+        self.tabs_changed.emit()
         return idx
 
     def _on_close_tab(self, idx: int) -> None:
         if idx == 0:
             return  # never close the primary document tab
         self._tabs.removeTab(idx)
+        self.tabs_changed.emit()
 
     def _on_current_tab_changed(self, idx: int) -> None:
         """Track the last-active EditorWidget tab and reposition overlay buttons."""
@@ -277,11 +300,24 @@ class EditorTabWidget(QWidget):
         return self._tabs.tabText(self._tabs.currentIndex())
 
     def set_main_tab_title(self, title: str) -> None:
-        """Rename the primary (index 0) tab."""
-        self._tabs.setTabText(0, title)
+        """Set the primary (index 0) tab title and update the stored base name.
 
-    def open_in_new_tab(self, text: str = "", title: str = "Draft") -> None:
-        """Open text in a new scratch tab and switch to it."""
+        Strips any existing ' — V{n}' suffix from *title* before storing
+        so calling this with a previously-displayed title is always safe.
+        """
+        base = _V_RE.sub("", title).rstrip()
+        self._base_title = base
+        self._tabs.setTabText(0, f"{base} — V1" if base else "V1")
+        self.tabs_changed.emit()
+
+    def open_in_new_tab(self, text: str = "", title: str | None = None) -> None:
+        """Open text in a new scratch tab and switch to it.
+
+        If *title* is None the tab receives an auto-generated versioned name
+        (e.g. 'Project — V3').  Pass an explicit string to override.
+        """
+        if title is None:
+            title = self._versioned_title()
         self._add_editor_tab(text, title)
 
     def get_main_text(self) -> str:
@@ -289,12 +325,77 @@ class EditorTabWidget(QWidget):
         editor = self._tabs.widget(0)
         return editor.get_text() if isinstance(editor, EditorWidget) else ""
 
-    def clone_current_tab(self) -> str:
-        """Copy active tab text into a new tab. Returns the cloned text."""
+    def clone_current_tab(self) -> tuple:
+        """Copy active tab text into a new versioned tab.
+
+        Returns ``(text, new_editor_widget)`` so the caller can register
+        a vault file path against the new widget via ``set_tab_path()``.
+        """
         text = self.get_text()
-        title = self.current_tab_title + " (copy)"
-        self._add_editor_tab(text, title)
-        return text
+        title = self._versioned_title()
+        editor = EditorWidget()
+        if text:
+            editor.set_text(text)
+        editor.text_changed.connect(self.text_changed)
+        editor.grammar_check_requested.connect(self.grammar_check_requested)
+        idx = self._tabs.addTab(editor, title)
+        self._tabs.setCurrentIndex(idx)
+        self.tabs_changed.emit()
+        return text, editor
+
+    # ------------------------------------------------------------------
+    # Version helpers
+    # ------------------------------------------------------------------
+
+    def _next_v_num(self) -> int:
+        """Scan all tab titles for ' — V{n}' and return max(n) + 1."""
+        max_v = 0
+        for i in range(self._tabs.count()):
+            m = _V_RE.search(self._tabs.tabText(i))
+            if m:
+                max_v = max(max_v, int(m.group(1)))
+        return max_v + 1
+
+    def _versioned_title(self) -> str:
+        v = self._next_v_num()
+        return f"{self._base_title} — V{v}" if self._base_title else f"V{v}"
+
+    # ------------------------------------------------------------------
+    # Per-tab vault file path registration
+    # ------------------------------------------------------------------
+
+    def set_tab_path(self, widget, path) -> None:
+        """Register a vault version file path for a given tab widget."""
+        self._widget_paths[widget] = path
+
+    # ------------------------------------------------------------------
+    # Rename (double-click or context menu)
+    # ------------------------------------------------------------------
+
+    def _on_rename_tab(self, idx: int) -> None:
+        current = self._tabs.tabText(idx)
+        new_title, ok = QInputDialog.getText(
+            self, "Rename Tab", "New name:", QLineEdit.EchoMode.Normal, current
+        )
+        if not ok or not new_title.strip() or new_title.strip() == current:
+            return
+        new_title = new_title.strip()
+        self._tabs.setTabText(idx, new_title)
+        # Keep base title in sync if renaming the primary tab
+        if idx == 0:
+            self._base_title = _V_RE.sub("", new_title).rstrip()
+        # Rename backing vault version file if one was registered
+        widget = self._tabs.widget(idx)
+        if widget in self._widget_paths:
+            old_path = self._widget_paths[widget]
+            new_path = old_path.parent / (new_title + old_path.suffix)
+            try:
+                old_path.rename(new_path)
+                self._widget_paths[widget] = new_path
+                logger.info("Renamed version file: %s → %s", old_path.name, new_path.name)
+            except Exception as exc:
+                logger.warning("Could not rename version file %s: %s", old_path, exc)
+        self.tabs_changed.emit()
 
     # ------------------------------------------------------------------
     # Low-level accessors (used by window.py session restore)
@@ -319,3 +420,9 @@ class EditorTabWidget(QWidget):
         browser = BrowserTab(url)
         idx = self._tabs.addTab(browser, title)
         self._tabs.setCurrentIndex(idx)
+        self.tabs_changed.emit()
+
+    def get_tab_text(self, idx: int) -> str:
+        """Return the text content of the editor tab at *idx* (empty for browser tabs)."""
+        w = self._tabs.widget(idx)
+        return w.get_text() if isinstance(w, EditorWidget) else ""

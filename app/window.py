@@ -12,6 +12,7 @@ import numpy as np
 from PyQt6.QtCore import QRunnable, QThreadPool, QObject, QTimer, pyqtSignal, pyqtSlot, Qt
 from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -324,6 +325,7 @@ class MainWindow(QMainWindow):
         self._tts_worker: TTSWorker | None = None
         self._generation_cancelled: bool = False
         self._kb: KnowledgeBase | None = None
+        self._kb_current_path: Path | None = None
         self._kb_build_worker: KBBuildWorker | None = None
         self._kb_query_worker: KBQueryWorker | None = None
         self._render_worker: RenderWorker | None = None
@@ -490,6 +492,7 @@ class MainWindow(QMainWindow):
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
 
         self._editor = EditorTabWidget()
+        self._editor.tabs_changed.connect(self._refresh_kb_source_combo)
         self._splitter.addWidget(self._editor)
 
         # AI panel with tabs
@@ -534,6 +537,9 @@ class MainWindow(QMainWindow):
         self._ai_panel.hide()
         self._splitter.addWidget(self._ai_panel)
         self._splitter.setSizes([1, 0])
+
+        # Populate KB source combo with initial tab list
+        QTimer.singleShot(0, self._refresh_kb_source_combo)
 
         return self._splitter
 
@@ -620,6 +626,18 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
 
+        # Source tab selector
+        src_row = QWidget()
+        srl = QHBoxLayout(src_row)
+        srl.setContentsMargins(0, 0, 0, 0)
+        srl.setSpacing(4)
+        srl.addWidget(QLabel("Source tab:"))
+        self._kb_source_combo = QComboBox()
+        self._kb_source_combo.setToolTip("Which editor tab to build the knowledge base from")
+        self._kb_source_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        srl.addWidget(self._kb_source_combo)
+        layout.addWidget(src_row)
+
         # Embed model + action buttons
         ctrl_row = QWidget()
         cl = QHBoxLayout(ctrl_row)
@@ -633,7 +651,7 @@ class MainWindow(QMainWindow):
         )
         cl.addWidget(self._embed_model_input)
         self._kb_build_btn = QPushButton("Build from Editor")
-        self._kb_build_btn.setToolTip("Embed the current editor content into a knowledge base")
+        self._kb_build_btn.setToolTip("Embed the selected source tab into a knowledge base")
         self._kb_build_btn.clicked.connect(self._on_build_kb)
         cl.addWidget(self._kb_build_btn)
         self._kb_load_btn = QPushButton("Load…")
@@ -746,13 +764,15 @@ class MainWindow(QMainWindow):
 
     def _on_clone_tab(self) -> None:
         """Clone active editor tab and save a vault version of its content."""
-        text = self._editor.clone_current_tab()
+        text, new_widget = self._editor.clone_current_tab()
         if self._vault and text.strip():
             suffix = self._current_file_path.suffix if self._current_file_path else ".md"
             version_path = self._vault.next_version_path(suffix)
             try:
                 version_path.parent.mkdir(parents=True, exist_ok=True)
                 version_path.write_text(text, encoding="utf-8")
+                # Register the file so renaming the tab also renames the file
+                self._editor.set_tab_path(new_widget, version_path)
                 self.statusBar().showMessage(
                     f"Cloned + version saved: {version_path.name}"
                 )
@@ -859,6 +879,8 @@ class MainWindow(QMainWindow):
         self._file_name_input.set_name(name)
         self._current_file_path = new_file_path
         self._dirty = False
+        self._kb = None
+        self._kb_current_path = None
         self._settings.last_file_path = str(new_file_path)
         self._settings.last_autosave_path = ""
         self._init_vault(new_file_path)
@@ -1225,7 +1247,7 @@ class MainWindow(QMainWindow):
     def _on_ai_output_to_tab(self) -> None:
         text = self._ai_output.toPlainText().strip()
         if text:
-            self._editor.open_in_new_tab(text, "AI Draft")
+            self._editor.open_in_new_tab(text)  # auto-generates versioned title
             self.statusBar().showMessage("AI output opened in new editor tab.")
 
     def _on_load_history_item(self) -> None:
@@ -1289,11 +1311,39 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Delete Error", str(exc))
 
     # ------------------------------------------------------------------
+    # Knowledge base — source tab combo
+    # ------------------------------------------------------------------
+
+    def _refresh_kb_source_combo(self) -> None:
+        """Repopulate the KB source tab combo with current editor tabs."""
+        from app.editor import EditorWidget
+        prev_idx = self._kb_source_combo.currentData()
+        self._kb_source_combo.blockSignals(True)
+        self._kb_source_combo.clear()
+        for i in range(self._editor.tab_count()):
+            w = self._editor.tab_widget_at(i)
+            if isinstance(w, EditorWidget):
+                title = self._editor._tabs.tabText(i)
+                self._kb_source_combo.addItem(title, userData=i)
+        # Restore previous selection if it still exists
+        if prev_idx is not None:
+            for j in range(self._kb_source_combo.count()):
+                if self._kb_source_combo.itemData(j) == prev_idx:
+                    self._kb_source_combo.setCurrentIndex(j)
+                    break
+        self._kb_source_combo.blockSignals(False)
+
+    # ------------------------------------------------------------------
     # Knowledge base — build
     # ------------------------------------------------------------------
 
     def _on_build_kb(self) -> None:
-        text = self._editor.get_text().strip()
+        # Use whichever editor tab the source combo points to
+        source_idx = self._kb_source_combo.currentData()
+        if source_idx is not None:
+            text = self._editor.get_tab_text(source_idx).strip()
+        else:
+            text = self._editor.get_text().strip()
         if not text:
             QMessageBox.warning(self, "Empty Editor", "Add text to the editor before building a KB.")
             return
@@ -1332,6 +1382,16 @@ class MainWindow(QMainWindow):
         self._kb_ask_btn.setEnabled(True)
         self._kb_chat.clear()
         self.statusBar().showMessage(f"Knowledge base built: {n} chunks.")
+        # Auto-save to vault so the KB survives session close/reopen
+        if self._vault:
+            try:
+                kb_path = self._vault.kb_dir / f"{kb.name}.vkb"
+                kb_path.parent.mkdir(parents=True, exist_ok=True)
+                kb.save(kb_path)
+                self._kb_current_path = kb_path
+                logger.info("KB auto-saved: %s", kb_path)
+            except Exception as exc:
+                logger.warning("KB auto-save failed: %s", exc)
 
     def _on_kb_build_error(self, error: str) -> None:
         QMessageBox.critical(self, "KB Build Error", error)
@@ -1379,6 +1439,7 @@ class MainWindow(QMainWindow):
             return
         try:
             self._kb = KnowledgeBase.load(Path(path))
+            self._kb_current_path = Path(path)
             n = len(self._kb.chunks)
             self._kb_status.setText(
                 f"KB loaded: '{self._kb.name}' — {n} chunk{'s' if n != 1 else ''} "
@@ -1837,7 +1898,7 @@ class MainWindow(QMainWindow):
                 },
                 "kb": {
                     "embed_model": self._embed_model_input.text(),
-                    "kb_path": "",
+                    "kb_path": str(self._kb_current_path) if self._kb_current_path else "",
                     "chat_text": self._kb_chat.toPlainText(),
                     "chat_messages": list(self._kb_chat_messages),
                 },
@@ -1880,6 +1941,8 @@ class MainWindow(QMainWindow):
                 self._autosave_path = self._compute_autosave_path(self._current_file_path)
 
             self._dirty = False
+            # Auto-restore KB from vault if available
+            self._try_restore_kb(data.get("ai", {}).get("kb", {}).get("kb_path", ""))
             self.statusBar().showMessage(
                 f"Session restored: {proj.get('name', 'project')}"
             )
@@ -1888,6 +1951,35 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Session restore failed — starting fresh.")
         finally:
             self._editor.text_changed.connect(self._mark_dirty)
+
+    def _try_restore_kb(self, saved_kb_path: str) -> None:
+        """Auto-load the KB for the current project on session restore."""
+        # Prefer the explicitly-saved path; fall back to the default vault KB location
+        kb_path: Path | None = None
+        if saved_kb_path:
+            p = Path(saved_kb_path)
+            if p.exists():
+                kb_path = p
+        if kb_path is None and self._vault:
+            name = self._file_name_input.get_name()
+            if name:
+                candidate = self._vault.kb_dir / f"{name}.vkb"
+                if candidate.exists():
+                    kb_path = candidate
+        if kb_path is None:
+            return
+        try:
+            self._kb = KnowledgeBase.load(kb_path)
+            self._kb_current_path = kb_path
+            n = len(self._kb.chunks)
+            self._kb_status.setText(
+                f"KB: '{self._kb.name}' — {n} chunk{'s' if n != 1 else ''} (auto-loaded)"
+            )
+            self._kb_save_btn.setEnabled(True)
+            self._kb_ask_btn.setEnabled(True)
+            logger.info("KB auto-loaded: %s", kb_path)
+        except Exception as exc:
+            logger.warning("KB auto-load failed: %s", exc)
 
     def _restore_editor_tabs(self, editor_data: dict) -> None:
         """Recreate editor tabs from session data without prompting for saves."""
@@ -2085,6 +2177,7 @@ class MainWindow(QMainWindow):
         self._stream_buffer = ""
         self._vault = None
         self._kb = None
+        self._kb_current_path = None
         self._current_file_path = None
         self._autosave_path = None
         self._dirty = False
