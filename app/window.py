@@ -393,27 +393,26 @@ class MainWindow(QMainWindow):
 
         file_menu = mb.addMenu("File")
 
-        new_action = QAction("New File", self)
+        new_action = QAction("New Project", self)
         new_action.setShortcut(QKeySequence.StandardKey.New)
         new_action.triggered.connect(self._on_new_file)
         file_menu.addAction(new_action)
-
-        file_menu.addSeparator()
-        file_menu.addAction("Open File…", self._on_open_file)
-        file_menu.addAction("Paste Text…", self._on_paste_text)
-        file_menu.addAction("Google Docs…", self._on_import_gdocs)
-        file_menu.addSeparator()
-        file_menu.addAction("Import Documents…", self._on_import_documents)
-        file_menu.addAction("Open from Imports…", self._on_open_from_imports)
-        file_menu.addSeparator()
-        file_menu.addAction("Choose Vault…", self._on_choose_vault)
-        file_menu.addSeparator()
         file_menu.addAction("Open Project…", self._on_open_project)
         file_menu.addAction("Close Project",  self._on_close_project)
+
+        file_menu.addSeparator()
+        file_menu.addAction("Open File…",   self._on_open_file)
+        file_menu.addAction("Paste Text…",  self._on_paste_text)
+        file_menu.addAction("Google Docs…", self._on_import_gdocs)
+
+        file_menu.addSeparator()
+        file_menu.addAction("Import Documents…",  self._on_import_documents)
+        file_menu.addAction("Open from Imports…", self._on_open_from_imports)
+
         file_menu.addSeparator()
         file_menu.addAction("Close All Tabs", self._on_close_all_tabs)
-        file_menu.addSeparator()
 
+        file_menu.addSeparator()
         exit_action = QAction("Exit", self)
         exit_action.setShortcut(QKeySequence.StandardKey.Quit)
         exit_action.triggered.connect(self._on_exit)
@@ -863,7 +862,21 @@ class MainWindow(QMainWindow):
     # File import actions
     # ------------------------------------------------------------------
 
+    def _require_project(self) -> bool:
+        """Return True if a project is open; otherwise prompt and return False."""
+        if self._vault is not None:
+            return True
+        QMessageBox.information(
+            self,
+            "No Project Open",
+            "Create a new project or open an existing one first.\n\n"
+            "File → New Project  or  File → Open Project…",
+        )
+        return False
+
     def _on_open_file(self) -> None:
+        if not self._require_project():
+            return
         start_dir = self._settings.last_open_dir or str(self._settings.output_dir)
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -1127,6 +1140,8 @@ class MainWindow(QMainWindow):
             logger.warning("Auto-save failed: %s", exc)
 
     def _on_paste_text(self) -> None:
+        if not self._require_project():
+            return
         from app.dialogs.paste_dialog import PasteDialog
         dlg = PasteDialog(self)
         if dlg.exec() and dlg.get_text().strip():
@@ -1134,6 +1149,8 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Text pasted into editor.")
 
     def _on_import_gdocs(self) -> None:
+        if not self._require_project():
+            return
         from app.dialogs.gdocs_dialog import GDocsDialog
         dlg = GDocsDialog(mode="import", parent=self)
         if not dlg.exec():
