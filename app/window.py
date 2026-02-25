@@ -2,12 +2,14 @@
 
 import logging
 import tempfile
+import shutil
 import threading
 from pathlib import Path
 
 import numpy as np
 
 from PyQt6.QtCore import QRunnable, QThreadPool, QObject, QTimer, pyqtSignal, pyqtSlot, Qt
+from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -33,7 +35,7 @@ from app.editor_tabs import EditorTabWidget
 from app.player import PlayerWidget
 from app.toolbar import FileNameInput, ModelSelectorCombo, PacingControls, VoiceSelectorCombo, Worker
 from config.settings import AppSettings
-from core.audio_processor import process_audio_pipeline
+from core.audio_processor import process_audio_pipeline, normalize_loudness, apply_eq
 from core.file_handler import (
     FileHandlerError,
     read_file,
@@ -47,7 +49,7 @@ from core.knowledge_base import (
     DEFAULT_EMBED_MODEL,
 )
 from core.ollama_client import OllamaClient, OllamaError
-from core.tts_engine import get_engine
+from core.tts_engine import get_engine, GPTSoVITSEngine
 from core.vault import Vault
 
 logger = logging.getLogger(__name__)
@@ -313,6 +315,7 @@ class MainWindow(QMainWindow):
         self._settings = AppSettings()
         self._ollama = OllamaClient(self._settings.ollama_host)
         self._tts_engine = get_engine(self._settings.tts_engine)
+        self._gptsovits_engine = GPTSoVITSEngine()
         self._pool = QThreadPool.globalInstance()
         self._current_audio_path: Path | None = None
         self._stream_worker: StreamWorker | None = None
@@ -372,11 +375,29 @@ class MainWindow(QMainWindow):
         mb = self.menuBar()
 
         file_menu = mb.addMenu("File")
+
+        new_action = QAction("New File", self)
+        new_action.setShortcut(QKeySequence.StandardKey.New)
+        new_action.triggered.connect(self._on_new_file)
+        file_menu.addAction(new_action)
+
+        file_menu.addSeparator()
         file_menu.addAction("Open File…", self._on_open_file)
         file_menu.addAction("Paste Text…", self._on_paste_text)
         file_menu.addAction("Google Docs…", self._on_import_gdocs)
         file_menu.addSeparator()
+        file_menu.addAction("Import Documents…", self._on_import_documents)
+        file_menu.addAction("Open from Imports…", self._on_open_from_imports)
+        file_menu.addSeparator()
         file_menu.addAction("Choose Vault…", self._on_choose_vault)
+        file_menu.addSeparator()
+        file_menu.addAction("Close All Tabs", self._on_close_all_tabs)
+        file_menu.addSeparator()
+
+        exit_action = QAction("Exit", self)
+        exit_action.setShortcut(QKeySequence.StandardKey.Quit)
+        exit_action.triggered.connect(self._on_exit)
+        file_menu.addAction(exit_action)
 
         export_menu = mb.addMenu("Export")
         export_menu.addAction("Commit Version", self._on_commit_version)
@@ -417,7 +438,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        self._voice_selector = VoiceSelectorCombo(self._tts_engine)
+        self._voice_selector = VoiceSelectorCombo(self._tts_engine, extra_engines=[self._gptsovits_engine])
         layout.addWidget(self._voice_selector)
 
         self._pacing = PacingControls(self._settings)
@@ -781,6 +802,99 @@ class MainWindow(QMainWindow):
             logger.info("Session autosave target: %s", self._autosave_path)
         except FileHandlerError as exc:
             QMessageBox.critical(self, "File Error", str(exc))
+
+    def _on_new_file(self) -> None:
+        if self._dirty:
+            reply = QMessageBox.question(
+                self,
+                "Unsaved Changes",
+                "Save changes before creating a new document?",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save,
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                return
+            if reply == QMessageBox.StandardButton.Save:
+                self._autosave()
+        self._editor.set_text("")
+        self._editor.set_main_tab_title("Untitled")
+        self._file_name_input.set_name("")
+        self._current_file_path = None
+        self._autosave_path = None
+        self._dirty = False
+        self._vault = None
+        self._refresh_history_tab()
+        self._settings.last_autosave_path = ""
+        self.statusBar().showMessage("New document created.")
+
+    def _on_close_all_tabs(self) -> None:
+        self._editor.close_all_non_primary_tabs()
+
+    def _on_import_documents(self) -> None:
+        start_dir = self._settings.last_open_dir or str(Path.home())
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Import Documents",
+            start_dir,
+            "Documents (*.md *.txt *.docx);;All Files (*)",
+        )
+        if not paths:
+            return
+        imports_dir = self._settings.imports_dir
+        imports_dir.mkdir(parents=True, exist_ok=True)
+        copied = 0
+        skipped: list[str] = []
+        for src_str in paths:
+            src = Path(src_str)
+            dest = imports_dir / src.name
+            # Collision-avoidance
+            n = 1
+            while dest.exists():
+                dest = imports_dir / f"{src.stem}_{n}{src.suffix}"
+                n += 1
+            try:
+                shutil.copy2(src, dest)
+                copied += 1
+            except Exception as exc:
+                logger.warning("Could not import %s: %s", src, exc)
+                skipped.append(src.name)
+        msg = f"{copied} file{'s' if copied != 1 else ''} imported to imports folder."
+        if skipped:
+            QMessageBox.warning(
+                self,
+                "Import Warning",
+                f"Could not import: {', '.join(skipped)}",
+            )
+        self.statusBar().showMessage(msg)
+
+    def _on_open_from_imports(self) -> None:
+        from app.dialogs.imports_dialog import ImportsBrowserDialog
+        dlg = ImportsBrowserDialog(self._settings.imports_dir, parent=self)
+        if not dlg.exec():
+            return
+        p = dlg.get_selected_path()
+        if not p:
+            return
+        try:
+            text = read_file(p)
+            self._editor.set_text(text)
+            self._editor.set_main_tab_title(p.stem)
+            self._file_name_input.set_name(p.stem)
+            self._settings.last_file_path = str(p)
+            self._settings.last_open_dir = str(p.parent)
+            self._current_file_path = p
+            self._init_vault(p)
+            self._autosave_path = self._compute_autosave_path(p)
+            self._dirty = False
+            self.statusBar().showMessage(f"Opened from imports: {p.name}")
+        except FileHandlerError as exc:
+            QMessageBox.critical(self, "File Error", str(exc))
+
+    def _on_exit(self) -> None:
+        self._autosave()
+        self.close()
 
     def _reopen_last_file(self) -> None:
         """Silently reload the last opened file on startup.
@@ -1348,8 +1462,10 @@ class MainWindow(QMainWindow):
         self._tts_btn.setEnabled(False)
         self.statusBar().showMessage("Synthesizing audio…")
 
+        engine = self._gptsovits_engine if (voice and voice.engine == "gptsovits") else self._tts_engine
+        self._current_voice_engine = voice.engine if voice else "kokoro"
         self._tts_worker = TTSWorker(
-            self._tts_engine,
+            engine,
             text,
             raw_path,
             voice,
@@ -1364,6 +1480,21 @@ class MainWindow(QMainWindow):
 
     def _on_tts_complete(self, raw_path_str: str) -> None:
         raw_path = Path(raw_path_str)
+
+        # GPT-SoVITS handles its own pacing and timing — skip silence removal and
+        # compression which clip words, but still apply EQ and loudness normalisation.
+        if getattr(self, "_current_voice_engine", "kokoro") == "gptsovits":
+            eq_path   = raw_path.with_name(raw_path.stem + "_eq.wav")
+            norm_path = raw_path.with_name(raw_path.stem + "_norm.wav")
+            def _eq_then_norm(src, eq, norm):
+                apply_eq(src, eq, highpass_hz=80.0, presence_hz=6000.0, presence_gain_db=1.5)
+                return normalize_loudness(eq, norm)
+            worker = Worker(_eq_then_norm, raw_path, eq_path, norm_path)
+            worker.signals.result.connect(self._on_processing_complete)
+            worker.signals.error.connect(self._on_tts_error)
+            self._pool.start(worker)
+            return
+
         processed_path = raw_path.with_name(raw_path.stem.replace("_raw", "_processed") + ".wav")
 
         self.statusBar().showMessage("Processing audio…")

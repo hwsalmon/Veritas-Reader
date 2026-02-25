@@ -152,6 +152,11 @@ class AppSettings:
     def kb_dir(self) -> Path:
         return Path(user_data_dir(APP_NAME)) / "knowledge_bases"
 
+    @property
+    def imports_dir(self) -> Path:
+        """Global imports staging folder inside the vault root."""
+        return self.vault_root / "imports"
+
     # ------------------------------------------------------------------
     # Renderer (GPT-SoVITS-v2)
     # ------------------------------------------------------------------

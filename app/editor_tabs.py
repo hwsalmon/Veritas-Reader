@@ -156,6 +156,11 @@ class EditorTabWidget(QWidget):
                 return
         self._tabs.removeTab(idx)
 
+    def close_all_non_primary_tabs(self) -> None:
+        """Close all tabs except index 0, prompting for unsaved content."""
+        for idx in range(self._tabs.count() - 1, 0, -1):
+            self._close_tab_with_warning(idx)
+
     def _copy_tab_by_index(self, idx: int) -> None:
         widget = self._tabs.widget(idx)
         if isinstance(widget, EditorWidget):
