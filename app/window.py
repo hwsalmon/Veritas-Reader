@@ -785,6 +785,7 @@ class MainWindow(QMainWindow):
                 version_path.write_text(text, encoding="utf-8")
                 # Register the file so renaming the tab also renames the file
                 self._editor.set_tab_path(new_widget, version_path)
+                self._save_session()  # checkpoint so a crash doesn't lose tab list
                 self.statusBar().showMessage(
                     f"Cloned + version saved: {version_path.name}"
                 )
