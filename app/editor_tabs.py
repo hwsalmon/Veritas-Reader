@@ -60,6 +60,7 @@ class EditorTabWidget(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self._last_editor_idx: int = 0
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -103,7 +104,7 @@ class EditorTabWidget(QWidget):
         # Reposition whenever tab layout changes or current tab switches
         self._tab_bar.layout_changed.connect(self._reposition_btns)
         self._tab_bar.context_menu_requested.connect(self._on_tab_context_menu)
-        self._tabs.currentChanged.connect(lambda _: self._reposition_btns())
+        self._tabs.currentChanged.connect(self._on_current_tab_changed)
 
         # Primary document tab (index 0) — always present, not closable
         self._add_editor_tab("", "Document")
@@ -231,10 +232,20 @@ class EditorTabWidget(QWidget):
             return  # never close the primary document tab
         self._tabs.removeTab(idx)
 
+    def _on_current_tab_changed(self, idx: int) -> None:
+        """Track the last-active EditorWidget tab and reposition overlay buttons."""
+        w = self._tabs.widget(idx)
+        if isinstance(w, EditorWidget):
+            self._last_editor_idx = idx
+        self._reposition_btns()
+
     def _active(self) -> EditorWidget:
         w = self._tabs.currentWidget()
-        # Fallback to first tab if somehow currentWidget is None
-        return w if isinstance(w, EditorWidget) else self._tabs.widget(0)
+        if isinstance(w, EditorWidget):
+            return w
+        # Current tab is a browser tab — fall back to the last known editor tab
+        fb = self._tabs.widget(self._last_editor_idx)
+        return fb if isinstance(fb, EditorWidget) else self._tabs.widget(0)
 
     # ------------------------------------------------------------------
     # Public API — mirrors EditorWidget

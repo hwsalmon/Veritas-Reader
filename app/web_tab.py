@@ -4,7 +4,11 @@ from pathlib import Path
 
 from platformdirs import user_data_dir
 from PyQt6.QtCore import QUrl
-from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+from PyQt6.QtWebEngineCore import (
+    QWebEnginePage,
+    QWebEngineProfile,
+    QWebEngineSettings,
+)
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import (
     QHBoxLayout,
@@ -26,6 +30,13 @@ def _get_profile() -> QWebEngineProfile:
         _profile.setPersistentCookiesPolicy(
             QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies
         )
+        s = _profile.settings()
+        # Allow JS to read/write clipboard (needed for image paste on Substack etc.)
+        s.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanAccessClipboard, True)
+        # Don't require a user gesture before media plays (allows audio on NotebookLM etc.)
+        s.setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
+        # Allow JS to open new windows (useful for OAuth pop-ups)
+        s.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanOpenWindows, True)
     return _profile
 
 
@@ -69,4 +80,13 @@ class BrowserTab(QWidget):
             lambda: self._view.setUrl(QUrl(self._address.text()))
         )
         self._view.urlChanged.connect(lambda u: self._address.setText(u.toString()))
+
+        # Auto-grant feature permissions (clipboard, media, notifications)
+        page.featurePermissionRequested.connect(self._on_permission_requested)
+
         self._view.setUrl(QUrl(url))
+
+    def _on_permission_requested(self, url, feature) -> None:
+        self._view.page().setFeaturePermission(
+            url, feature, QWebEnginePage.PermissionPolicy.PermissionGrantedByUser
+        )

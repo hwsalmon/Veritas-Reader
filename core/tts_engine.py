@@ -377,6 +377,48 @@ class CoquiEngine(TTSEngine):
 
 
 # ------------------------------------------------------------------
+# GPT-SoVITS profiles engine
+# ------------------------------------------------------------------
+
+class GPTSoVITSEngine(TTSEngine):
+    """Lists voice profiles from a local profiles directory and synthesises
+    via the GPT-SoVITS renderer.  Each subdirectory that contains a
+    profile.json is exposed as a voice in the dropdown."""
+
+    def __init__(self, profiles_dir: Path | str | None = None) -> None:
+        if profiles_dir is None:
+            profiles_dir = Path.home() / "Documents" / "veritas_profiles"
+        self._profiles_dir = Path(profiles_dir).expanduser().resolve()
+
+    def list_voices(self) -> list[VoiceProfile]:
+        voices: list[VoiceProfile] = []
+        if not self._profiles_dir.exists():
+            return voices
+        for entry in sorted(self._profiles_dir.iterdir()):
+            if entry.is_dir() and (entry / "profile.json").exists():
+                voices.append(VoiceProfile(
+                    id=f"gptsovits:{entry.name}",
+                    name=entry.name.title(),
+                    engine="gptsovits",
+                    extra={"profile_path": str(entry)},
+                ))
+        return voices
+
+    def synthesize(
+        self,
+        text: str,
+        output_path: Path,
+        voice: VoiceProfile | None = None,
+        speed: float = 1.0,
+        **kwargs,
+    ) -> Path:
+        if voice is None or "profile_path" not in voice.extra:
+            raise ValueError("GPTSoVITSEngine requires a voice with a profile_path.")
+        from core.renderer import export_to_wav
+        return export_to_wav(text, Path(output_path), voice.extra["profile_path"])
+
+
+# ------------------------------------------------------------------
 # Factory
 # ------------------------------------------------------------------
 

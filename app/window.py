@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -514,9 +515,16 @@ class MainWindow(QMainWindow):
         al.addWidget(web_row)
 
         self._ai_tabs = QTabWidget()
+        self._ai_tabs.setTabsClosable(True)
+        self._ai_tabs.tabCloseRequested.connect(self._on_close_ai_tab)
         self._ai_tabs.addTab(self._build_generate_tab(), "Generate")
         self._ai_tabs.addTab(self._build_kb_tab(), "KB Chat")
         self._ai_tabs.addTab(self._build_history_tab(), "History")
+        # Remove close buttons from the 3 permanent tabs
+        from PyQt6.QtWidgets import QTabBar
+        for i in range(3):
+            self._ai_tabs.tabBar().setTabButton(i, QTabBar.ButtonPosition.RightSide, None)
+            self._ai_tabs.tabBar().setTabButton(i, QTabBar.ButtonPosition.LeftSide, None)
         al.addWidget(self._ai_tabs)
 
         self._ai_panel.hide()
@@ -749,12 +757,19 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage("Tab cloned.")
 
+    def _on_close_ai_tab(self, idx: int) -> None:
+        """Close a dynamically-added AI browser tab; protect the 3 permanent tabs."""
+        if idx >= 3:
+            self._ai_tabs.removeTab(idx)
+
     def _open_ai_browser(self, url: str, title: str) -> None:
         """Open a persistent browser tab in the AI panel."""
         from app.web_tab import BrowserTab
+        from PyQt6.QtWidgets import QTabBar
         browser = BrowserTab(url)
         self._ai_tabs.addTab(browser, title)
-        self._ai_tabs.setCurrentIndex(self._ai_tabs.count() - 1)
+        new_idx = self._ai_tabs.count() - 1
+        self._ai_tabs.setCurrentIndex(new_idx)
         if not self._ai_panel.isVisible():
             self._ai_panel.show()
             self._splitter.setSizes([600, 420])
@@ -818,16 +833,33 @@ class MainWindow(QMainWindow):
                 return
             if reply == QMessageBox.StandardButton.Save:
                 self._autosave()
+
+        name, ok = QInputDialog.getText(
+            self,
+            "New Project",
+            "Project name:",
+            QLineEdit.EchoMode.Normal,
+            "",
+        )
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            name = "Untitled"
+
+        # Build a logical file path inside the vault root so vault + autosave work
+        new_file_path = self._settings.vault_root / name / f"{name}.md"
+
         self._editor.set_text("")
-        self._editor.set_main_tab_title("Untitled")
-        self._file_name_input.set_name("")
-        self._current_file_path = None
-        self._autosave_path = None
+        self._editor.set_main_tab_title(name)
+        self._file_name_input.set_name(name)
+        self._current_file_path = new_file_path
         self._dirty = False
-        self._vault = None
-        self._refresh_history_tab()
+        self._settings.last_file_path = str(new_file_path)
         self._settings.last_autosave_path = ""
-        self.statusBar().showMessage("New document created.")
+        self._init_vault(new_file_path)
+        self._autosave_path = self._compute_autosave_path(new_file_path)
+        self.statusBar().showMessage(f"New project '{name}' created.")
 
     def _on_close_all_tabs(self) -> None:
         self._editor.close_all_non_primary_tabs()

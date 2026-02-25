@@ -103,6 +103,7 @@ class VoiceProfile:
     top_p:           float = 1.0
     temperature:     float = 1.0
     speed:           float = 1.0
+    how_to_cut:      str  = "Slice by every punct"
     gptsovits_path:  Path | None = None
 
 
@@ -155,6 +156,7 @@ def load_profile(profile_path: str | Path) -> VoiceProfile:
         top_p          = float(cfg.get("top_p", 1.0)),
         temperature    = float(cfg.get("temperature", 1.0)),
         speed          = float(cfg.get("speed", 1.0)),
+        how_to_cut     = str(cfg.get("how_to_cut", "Slice by every punct")),
         gptsovits_path = sv_path,
     )
 
@@ -238,7 +240,27 @@ def _load_models(profile: VoiceProfile) -> None:
     except ImportError:
         pass
 
-    # Import inference helpers from the GPT-SoVITS repo
+    # Import inference helpers from the GPT-SoVITS repo.
+    # inference_webui.py does `from config import change_choices …` at module level.
+    # When running inside Veritas-Reader, sys.modules["config"] points to our own
+    # config/ package.  Fix: use importlib to directly load GPT-SoVITS's config.py
+    # into sys.modules["config"] before the import runs, then restore ours after.
+    import sys as _sys
+    import importlib.util as _ilu
+
+    _gptsovits_config_path = profile.gptsovits_path / "config.py"
+    _config_spec = _ilu.spec_from_file_location("config", str(_gptsovits_config_path))
+    _gptsovits_config_mod = _ilu.module_from_spec(_config_spec)
+    _saved_config = _sys.modules.get("config")
+    _sys.modules["config"] = _gptsovits_config_mod
+    _config_spec.loader.exec_module(_gptsovits_config_mod)  # type: ignore[union-attr]
+
+    # Evict any stale/partial inference_webui so Python re-executes it with the
+    # correct config binding.
+    for _k in list(_sys.modules):
+        if "inference_webui" in _k:
+            _sys.modules.pop(_k, None)
+
     try:
         from GPT_SoVITS.inference_webui import (  # type: ignore[import]
             change_gpt_weights,
@@ -250,6 +272,12 @@ def _load_models(profile: VoiceProfile) -> None:
             f"Could not import GPT_SoVITS.inference_webui — "
             f"check GPTSOVITS_PATH ({profile.gptsovits_path}): {exc}"
         ) from exc
+    finally:
+        # Restore Veritas-Reader's config package so the rest of the app is unaffected.
+        if _saved_config is not None:
+            _sys.modules["config"] = _saved_config
+        elif "config" in _sys.modules and _sys.modules["config"] is _gptsovits_config_mod:
+            del _sys.modules["config"]
 
     logger.info("Loading GPT weights:    %s", profile.gpt_model)
     logger.info("Loading SoVITS weights: %s", profile.sovits_model)
@@ -466,6 +494,7 @@ def export_to_wav(
             top_p             = profile.top_p,
             temperature       = profile.temperature,
             speed             = profile.speed,
+            how_to_cut        = profile.how_to_cut,
         )
 
         model_sr, audio = _collect_audio(gen)

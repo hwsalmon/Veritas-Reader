@@ -128,11 +128,12 @@ class ModelSelectorCombo(QWidget):
 # ---------------------------------------------------------------------------
 
 class VoiceSelectorCombo(QWidget):
-    """Dropdown listing TTS voice profiles."""
+    """Dropdown listing TTS voice profiles from one or more engines."""
 
-    def __init__(self, tts_engine, parent=None) -> None:
+    def __init__(self, tts_engine, extra_engines=None, parent=None) -> None:
         super().__init__(parent)
         self._engine = tts_engine
+        self._extra_engines = extra_engines or []
         self._voices = []
         self._build_ui()
         self._populate()
@@ -150,6 +151,8 @@ class VoiceSelectorCombo(QWidget):
 
     def _populate(self) -> None:
         self._voices = self._engine.list_voices()
+        for eng in self._extra_engines:
+            self._voices.extend(eng.list_voices())
         self._combo.clear()
         for v in self._voices:
             self._combo.addItem(v.name, userData=v)
