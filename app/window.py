@@ -1406,10 +1406,12 @@ class MainWindow(QMainWindow):
     def _on_build_kb(self) -> None:
         # Use whichever editor tab the source combo points to
         source_idx = self._kb_source_combo.currentData()
+        logger.debug("KB build: source_idx=%r combo_count=%d", source_idx, self._kb_source_combo.count())
         if source_idx is not None:
             text = self._editor.get_tab_text(source_idx).strip()
         else:
             text = self._editor.get_text().strip()
+        logger.debug("KB build: text_len=%d", len(text))
         if not text:
             QMessageBox.warning(self, "Empty Editor", "Add text to the editor before building a KB.")
             return
