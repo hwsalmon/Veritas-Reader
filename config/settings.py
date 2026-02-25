@@ -227,5 +227,13 @@ class AppSettings:
     def dark_mode(self, value: bool) -> None:
         self._qs.setValue("ui/dark_mode", value)
 
+    @property
+    def font_size(self) -> int:
+        return int(self._qs.value("ui/font_size", 11))
+
+    @font_size.setter
+    def font_size(self, value: int) -> None:
+        self._qs.setValue("ui/font_size", int(value))
+
     def sync(self) -> None:
         self._qs.sync()

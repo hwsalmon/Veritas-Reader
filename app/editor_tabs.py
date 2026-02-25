@@ -78,6 +78,7 @@ class EditorTabWidget(QWidget):
         self._last_editor_idx: int = 0
         self._base_title: str = ""          # project name without version suffix
         self._widget_paths: dict = {}       # EditorWidget → Path (vault version file)
+        self._font_size: int = 11           # current font size, applied to new tabs
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -240,6 +241,7 @@ class EditorTabWidget(QWidget):
 
     def _add_editor_tab(self, text: str, title: str) -> int:
         editor = EditorWidget()
+        editor.set_font_size(self._font_size)
         if text:
             editor.set_text(text)
         editor.text_changed.connect(self.text_changed)
@@ -248,6 +250,14 @@ class EditorTabWidget(QWidget):
         self._tabs.setCurrentIndex(idx)
         self.tabs_changed.emit()
         return idx
+
+    def set_font_size(self, size: int) -> None:
+        """Apply *size* to all existing editor tabs and remember it for new ones."""
+        self._font_size = size
+        for i in range(self._tabs.count()):
+            w = self._tabs.widget(i)
+            if isinstance(w, EditorWidget):
+                w.set_font_size(size)
 
     def _on_close_tab(self, idx: int) -> None:
         if idx == 0:

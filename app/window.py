@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from PyQt6.QtCore import QRunnable, QThreadPool, QObject, QTimer, pyqtSignal, pyqtSlot, Qt
-from PyQt6.QtGui import QAction, QKeySequence
+from PyQt6.QtGui import QAction, QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -342,6 +342,7 @@ class MainWindow(QMainWindow):
         self.resize(1200, 780)
         self._build_ui()
         self._restore_geometry()
+        self._apply_font_size(self._settings.font_size)
         self._restore_last_session()
 
         self._autosave_timer = QTimer(self)
@@ -374,6 +375,18 @@ class MainWindow(QMainWindow):
         self._editor.text_changed.connect(self._mark_dirty)
         self._editor.grammar_check_requested.connect(self._on_grammar_check)
         self._editor.clone_requested.connect(self._on_clone_tab)
+
+        # Global text-size shortcuts (work regardless of which widget has focus)
+        zoom_in_sc = QShortcut(QKeySequence.StandardKey.ZoomIn, self)
+        zoom_in_sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        zoom_in_sc.activated.connect(self._zoom_in)
+        # Ctrl+= (no-shift) as an additional zoom-in binding
+        zoom_in_eq = QShortcut(QKeySequence("Ctrl+="), self)
+        zoom_in_eq.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        zoom_in_eq.activated.connect(self._zoom_in)
+        zoom_out_sc = QShortcut(QKeySequence.StandardKey.ZoomOut, self)
+        zoom_out_sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        zoom_out_sc.activated.connect(self._zoom_out)
 
     def _build_menu_bar(self) -> None:
         mb = self.menuBar()
@@ -798,6 +811,41 @@ class MainWindow(QMainWindow):
             self._ai_panel.show()
             self._splitter.setSizes([600, 420])
             self._ai_toggle_btn.setText("✦ AI ✕")
+
+    # ------------------------------------------------------------------
+    # Text size zoom
+    # ------------------------------------------------------------------
+
+    _FONT_MIN = 7
+    _FONT_MAX = 28
+
+    def _zoom_in(self) -> None:
+        self._apply_font_size(self._settings.font_size + 1)
+
+    def _zoom_out(self) -> None:
+        self._apply_font_size(self._settings.font_size - 1)
+
+    def _apply_font_size(self, size: int) -> None:
+        """Apply *size* (clamped to 7–28 pt) to every text widget in the app."""
+        size = max(self._FONT_MIN, min(self._FONT_MAX, size))
+        self._settings.font_size = size
+
+        # Editor tabs (all existing + future tabs via EditorTabWidget.set_font_size)
+        self._editor.set_font_size(size)
+
+        # AI / KB panel text widgets — use the app's default sans-serif at new size
+        panel_font = QFont()
+        panel_font.setPointSize(size)
+        for w in (
+            self._prompt_input,
+            self._ai_output,
+            self._kb_chat,
+            self._kb_question,
+            self._followup_input,
+        ):
+            w.setFont(panel_font)
+
+        self.statusBar().showMessage(f"Text size: {size} pt", 2000)
 
     def _on_toggle_theme(self) -> None:
         from PyQt6.QtWidgets import QApplication

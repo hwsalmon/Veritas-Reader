@@ -433,6 +433,11 @@ class EditorWidget(QWidget):
     def is_empty(self) -> bool:
         return not self.get_text().strip()
 
+    def set_font_size(self, size: int) -> None:
+        """Update the point size of both editor panes, keeping their typefaces."""
+        self._markup_editor.setFont(QFont("Monospace", size))
+        self._rich_editor.setFont(QFont("Georgia", size))
+
     # ------------------------------------------------------------------
     # Event filter — Tab / Shift+Tab for indent in markup mode
     # ------------------------------------------------------------------
