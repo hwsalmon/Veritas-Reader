@@ -1,22 +1,18 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <defs>
-    <!-- Deep indigo background gradient -->
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%"   stop-color="#1c1f3a"/>
       <stop offset="100%" stop-color="#2e3260"/>
     </linearGradient>
-    <!-- Gold shimmer for S -->
     <linearGradient id="gold" x1="0%" y1="0%" x2="0%" y2="100%">
       <stop offset="0%"   stop-color="#f5d080"/>
       <stop offset="50%"  stop-color="#e8a820"/>
       <stop offset="100%" stop-color="#c47d0a"/>
     </linearGradient>
-    <!-- Silver-white for V -->
     <linearGradient id="silver" x1="0%" y1="0%" x2="0%" y2="100%">
       <stop offset="0%"   stop-color="#e8eaf5"/>
       <stop offset="100%" stop-color="#9aa0c8"/>
     </linearGradient>
-    <!-- Subtle glow for S -->
     <filter id="glowGold" x="-15%" y="-15%" width="130%" height="130%">
       <feGaussianBlur in="SourceAlpha" stdDeviation="7" result="blur"/>
       <feFlood flood-color="#d4930a" flood-opacity="0.45" result="color"/>
@@ -26,7 +22,6 @@
         <feMergeNode in="SourceGraphic"/>
       </feMerge>
     </filter>
-    <!-- Subtle glow for V -->
     <filter id="glowSilver" x="-15%" y="-15%" width="130%" height="130%">
       <feGaussianBlur in="SourceAlpha" stdDeviation="6" result="blur"/>
       <feFlood flood-color="#4a5299" flood-opacity="0.4" result="color"/>
@@ -36,31 +31,21 @@
         <feMergeNode in="SourceGraphic"/>
       </feMerge>
     </filter>
-    <!--
-      Interlocking trick: draw V, then S on top, then re-draw only the
-      TOP portion of V (above y=210) in front — so V's arms cross OVER
-      the S's upper curves while S's body covers V's lower portion.
-    -->
+    <!-- Only the top portion of the icon — for V arms crossing in front of S -->
     <clipPath id="vArmsClip">
-      <rect x="0" y="0" width="512" height="210"/>
+      <rect x="0" y="0" width="512" height="228"/>
     </clipPath>
   </defs>
 
-  <!-- Rounded square background -->
+  <!-- Background -->
   <rect x="0" y="0" width="512" height="512" rx="96" ry="96" fill="url(#bg)"/>
-
-  <!-- Thin gold border ring -->
   <rect x="10" y="10" width="492" height="492" rx="88" ry="88"
         fill="none" stroke="#e8a820" stroke-width="3" opacity="0.5"/>
 
-  <!-- Decorative rule above letters -->
-  <line x1="108" y1="145" x2="404" y2="145"
-        stroke="#e8a820" stroke-width="1.5" opacity="0.4"/>
-
-  <!-- ═══ LAYER 1: V  — behind S ═══ -->
-  <text x="256" y="340"
+  <!-- LAYER 1: V — behind S -->
+  <text x="256" y="372"
         font-family="Georgia, 'Times New Roman', serif"
-        font-size="264"
+        font-size="252"
         font-weight="bold"
         font-style="italic"
         text-anchor="middle"
@@ -68,41 +53,25 @@
         filter="url(#glowSilver)"
         opacity="0.92">V</text>
 
-  <!-- ═══ LAYER 2: S  — in front of V's body ═══ -->
-  <text x="256" y="325"
+  <!-- LAYER 2: S — in front of V's body (gold, slightly larger) -->
+  <text x="256" y="372"
         font-family="Georgia, 'Times New Roman', serif"
-        font-size="206"
+        font-size="296"
         font-weight="bold"
         font-style="italic"
         text-anchor="middle"
         fill="url(#gold)"
         filter="url(#glowGold)">S</text>
 
-  <!-- ═══ LAYER 3: V arms re-drawn, clipped to top region only ═══
-       This makes the top of V's arms appear IN FRONT of S's upper curves,
-       completing the interlocking effect.                               -->
-  <text x="256" y="340"
+  <!-- LAYER 3: V arms only — redrawn clipped to top region
+       Makes V's splayed arms appear IN FRONT of S's upper curves -->
+  <text x="256" y="372"
         font-family="Georgia, 'Times New Roman', serif"
-        font-size="264"
+        font-size="252"
         font-weight="bold"
         font-style="italic"
         text-anchor="middle"
         fill="url(#silver)"
         clip-path="url(#vArmsClip)"
         opacity="0.92">V</text>
-
-  <!-- Decorative rule below letters -->
-  <line x1="108" y1="358" x2="404" y2="358"
-        stroke="#e8a820" stroke-width="1.5" opacity="0.4"/>
-
-  <!-- Subtitle -->
-  <text x="256" y="415"
-        font-family="Georgia, 'Times New Roman', serif"
-        font-size="34"
-        font-weight="normal"
-        font-style="italic"
-        text-anchor="middle"
-        fill="#c8cfea"
-        opacity="0.6"
-        letter-spacing="5">scriptum veritas</text>
 </svg>
