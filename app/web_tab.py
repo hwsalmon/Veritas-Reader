@@ -1,5 +1,6 @@
 """Persistent embedded browser widget for Veritas Editor."""
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -99,8 +100,14 @@ class BrowserTab(QWidget):
 
     def _on_open_in_browser(self) -> None:
         url = self.current_url()
-        if url and url not in ("about:blank", ""):
-            subprocess.Popen(["xdg-open", url])
+        if not url or url in ("about:blank", ""):
+            return
+        # Prefer Chrome/Chromium (full codecs, Google auth) over the system default
+        for browser in ("google-chrome-stable", "google-chrome", "chromium-browser", "chromium"):
+            if shutil.which(browser):
+                subprocess.Popen([browser, url])
+                return
+        subprocess.Popen(["xdg-open", url])
 
     def _on_permission_requested(self, url, feature) -> None:
         self._view.page().setFeaturePermission(

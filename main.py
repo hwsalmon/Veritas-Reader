@@ -21,12 +21,21 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Must be set before QApplication is created — Chromium reads it at process start.
-# Removes the "user gesture required" block on media autoplay (helps NotebookLM audio).
+# Must be set before QApplication is created — Chromium reads these at process start.
 os.environ.setdefault(
     "QTWEBENGINE_CHROMIUM_FLAGS",
-    "--autoplay-policy=no-user-gesture-required",
+    # Allow media to play without a prior user click
+    "--autoplay-policy=no-user-gesture-required"
+    # Disable the out-of-process audio service and its sandbox — fixes audio on Wayland/Linux
+    " --disable-features=AudioServiceOutOfProcess,AudioServiceSandbox"
+    # Disable cross-origin isolation enforcement that blocks media on Google CDN URLs
+    " --disable-features=CrossOriginOpenerPolicy,CrossOriginEmbedderPolicy"
+    # Use the Chromium audio backend directly (avoids PipeWire handshake issues)
+    " --use-fake-ui-for-media-stream"
 )
+# Enable remote DevTools on port 9222 so you can inspect exactly what's failing
+# (open chrome://inspect or http://localhost:9222 in Chrome while the app is running)
+os.environ.setdefault("QTWEBENGINE_REMOTE_DEBUGGING", "9222")
 
 
 def main() -> int:
