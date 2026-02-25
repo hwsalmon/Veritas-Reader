@@ -8,6 +8,13 @@ Scriptum Veritas combines a rich markdown editor, local LLM text generation via 
 
 ## Features
 
+### File Management
+- **New File** (`Ctrl+N`) — clear the editor with a Save / Discard / Cancel prompt when there are unsaved changes
+- **Import Documents** — multi-select `.md`, `.txt`, or `.docx` files; copies them into `VeritasVault/imports/` with automatic collision avoidance
+- **Open from Imports** — browse the imports folder in a dialog, double-click to load; includes a "Reveal Folder" button
+- **Close All Tabs** — closes every scratch tab (prompts on unsaved content), leaving the primary document tab intact
+- **Exit** (`Ctrl+Q`) — autosaves then closes cleanly
+
 ### Editor
 - Multi-tab editor with clone, right-click close, and unsaved-content warnings
 - Markup ↔ Formatted toggle — switch between raw markdown and rendered rich text
@@ -115,7 +122,8 @@ scriptum-veritas/
 │   ├── theme.py               # Dark / light palette
 │   └── dialogs/
 │       ├── paste_dialog.py
-│       └── gdocs_dialog.py
+│       ├── gdocs_dialog.py
+│       └── imports_dialog.py  # Imports folder browser
 ├── core/
 │   ├── file_handler.py        # .md / .txt / .docx read & write
 │   ├── ollama_client.py       # Ollama HTTP client (generate, chat, embed)
